@@ -1,0 +1,4 @@
+read: [README.md, todo.md]
+auto-commits: false
+auto-lint: false
+watch-files: true
