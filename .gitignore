@@ -1,2 +1,7 @@
+jsonb_stats.dylib
+jsonb_stats.o
+regression.diffs
+regression.out
+results/*
 .aider*
 !.aider.conf.yml
