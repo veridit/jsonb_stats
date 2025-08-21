@@ -1,0 +1,19 @@
+{
+   "name": "jsonb_stats",
+   "abstract": "PostgreSQL extension for multi-level statistical aggregation with JSONB",
+   "version": "1.0.0",
+   "maintainer": "Jørgen H. Fjeld <jorgen@veridit.no>",
+   "license": "postgresql",
+   "provides": {
+      "jsonb_stats": {
+         "abstract": "PostgreSQL extension for multi-level statistical aggregation with JSONB",
+         "file": "jsonb_stats.sql",
+         "docfile": "README.md",
+         "version": "1.0.0"
+      }
+   },
+   "meta-spec": {
+      "version": "1.0.0",
+      "url": "https://pgxn.org/meta/spec.txt"
+   }
+}

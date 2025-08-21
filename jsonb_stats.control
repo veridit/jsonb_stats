@@ -1,0 +1,4 @@
+comment = 'jsonb_stats: PostgreSQL extension for multi-level statistical aggregation with JSONB'
+default_version = '1.0'
+module_pathname = '$libdir/jsonb_stats'
+relocatable = true
