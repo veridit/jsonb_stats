@@ -148,12 +148,12 @@ GROUP BY luh.valid_from, luh.valid_to, luh.region;
 This view takes the aggregation one step further to a global `stats_summary`. This summary doesn't keep individual values but provides summary statistics, like counts, sums, and distinct values, making it ideal for analytics. Importantly, this global summary can be calculated by combining the regional summaries from the `history_facet` view, which is a key feature of the `jsonb_stats` extension.
 
 ```sql
--- This view would use a `jsonb_stats_summary_combine_agg(stats_summary)` on the faceted summaries.
+-- This view would use a `jsonb_stats_summary_merge_agg(stats_summary)` on the faceted summaries.
 CREATE MATERIALIZED VIEW history AS
 SELECT
     hf.valid_from,
     hf.valid_to,
-    jsonb_stats_summary_combine_agg(hf.stats_summary) as stats_summary
+    jsonb_stats_summary_merge_agg(hf.stats_summary) as stats_summary
 FROM history_facet hf
 GROUP BY hf.valid_from, hf.valid_to;
 
@@ -162,62 +162,10 @@ GROUP BY hf.valid_from, hf.valid_to;
 -- efficient for reporting on large datasets.
 ```
 
-### Relevant Code from `statbus`
-
-The `statbus` project contained a PL/pgSQL implementation of the aggregation logic that served as a reference for the C implementation in this extension. The reference code has been ported into `jsonb_stats--1.0.sql` and the original files can now be discarded.
-
-#### Core Logic
-
-The core logic for the second-level (`stats` -> `stats_summary`) and third-level (`stats_summary` -> combined `stats_summary`) aggregations was originally sourced from:
-
--   `statbus/migrations/20240229000000_create_jsonb_stats_to_summary.up.sql`
--   `statbus/migrations/20240301000000_create_jsonb_stats_summary_merge.up.sql`
-
-#### Testing
-
-The file `statbus/test/sql/004_jsonb_stats_to_summary.sql` contains a comprehensive set of test cases for the aggregation logic. These can be adapted for the extension's regression tests.
-
-#### Extension Boilerplate
-
-The `sql_saga` directory serves as an excellent template for the necessary boilerplate for a PostgreSQL extension, including the `Makefile`, `sql_saga.control` file, and `META.json`.
-
-### Discrepancies between Plan and PL/pgSQL Implementation
-
-The ported PL/pgSQL code from `statbus` has a slightly different `stats_summary` structure than what was initially outlined in `README.md`. These differences need to be resolved before proceeding with the C implementation.
-
-1.  **Numeric Summary:**
-    *   **Plan:** `{ "type": "...", "count": N, "sum": S, "min": M, "max": X }`
-    *   **Implementation:** The implementation also includes `mean` and `sum_sq_diff` to support online variance calculation. This is a beneficial addition.
-    *   **Decision:** The plan and documentation should be updated to adopt the richer structure from the implementation.
-
-2.  **Boolean Summary:**
-    *   **Plan:** `{ "type": "...", "true_count": T, "false_count": F }`
-    *   **Implementation:** `{ "type": "...", "counts": { "true": T, "false": F } }`
-    *   **Decision:** Decide whether to use a nested `counts` object or top-level keys. The nested object is more consistent with the text summary's structure.
-
-3.  **Text Summary:**
-    *   **Plan:** `{ "type": "...", "distinct_values": N, "values": [...] }`
-    *   **Implementation:** `{ "type": "...", "counts": { "value1": N, "value2": M, ... } }` (A frequency map).
-    *   **Decision:** Decide which structure is more useful. The implementation's frequency map provides more information (the count for each value) and the planned structure can be derived from it. The implementation seems superior.
-
-### Function Naming and Semantics
-
-This section clarifies the function names used in the documentation (`README.md`, the "plan") versus those in the ported PL/pgSQL implementation (`jsonb_stats--1.0.sql`).
-
-| Level | Role                  | Name in Plan/Docs (`README.md`)   | Name in Ported Code (`.sql`)        | Comment / Decision Needed                                                                                                                      |
-|-------|-----------------------|-----------------------------------|-------------------------------------|------------------------------------------------------------------------------------------------------------------------------------------------|
-| L1    | Aggregate             | `jsonb_stats_agg`                 | `jsonb_stats_agg`                   | **Consistent.**                                                                                                                                |
-| L1    | `sfunc` (internal)    | (not specified)                   | `jsonb_stats_sfunc`                 | Name is clear. **Keep.**                                                                                                                       |
-| L2    | Aggregate             | `jsonb_stats_summary_agg`         | `jsonb_stats_summary_agg`           | **Consistent.**                                                                                                                                |
-| L2    | `sfunc` (internal)    | (not specified)                   | `jsonb_stats_to_summary`            | **Inconsistent Semantics.** The name `to_summary` suggests a one-shot conversion, not an incremental accumulation. A better name would be `jsonb_stats_summary_accum`. |
-| L3    | Aggregate             | `jsonb_stats_summary_combine_agg` | `jsonb_stats_summary_combine_agg`   | **Inconsistent Semantics.** The name `combine` is vague. Renaming to `jsonb_stats_summary_merge_agg` would align it with its `sfunc` (`_merge`). |
-| L3    | `sfunc` (internal)    | (not specified)                   | `jsonb_stats_summary_merge`         | Name is clear. **Keep.**                                                                                                                       |
-| L2/L3 | `finalfunc` (internal)| (not specified)                   | `jsonb_stats_to_summary_round`      | Name is clear. **Keep.**                                                                                                                       |
 
 ### TODO
 
--   [ ] Decide on final `stats_summary` structure and update documentation.
--   [ ] Decide on final function names and update documentation.
+-   [x] Standardize `stats_summary` structure and function names.
 -   [x] Define API and create SQL stubs (`jsonb_stats--1.0.sql`).
 -   [x] Port PL/pgSQL implementation into the extension.
 -   [x] Create regression test for PL/pgSQL API (`sql/002_jsonb_stats_api_plpgsql.sql`).
@@ -225,6 +173,6 @@ This section clarifies the function names used in the documentation (`README.md`
 -   [ ] Implement `stat_c(anyelement)`.
 -   [ ] Implement `jsonb_stats_agg_c(text, jsonb)`.
 -   [ ] Implement `jsonb_stats_summary_agg_c(jsonb)`.
--   [ ] Implement `jsonb_stats_summary_combine_agg_c(jsonb)`.
+-   [ ] Implement `jsonb_stats_summary_merge_agg_c(jsonb)`.
 -   [ ] Define C structures for aggregate states.
 -   [ ] Add documentation for C implementation details.

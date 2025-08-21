@@ -31,7 +31,7 @@ CREATE AGGREGATE jsonb_stats_agg(text, jsonb) (
 );
 
 -- Level 2: stats -> stats_summary
-CREATE FUNCTION jsonb_stats_to_summary(state jsonb, stats jsonb)
+CREATE FUNCTION jsonb_stats_summary_accum(state jsonb, stats jsonb)
 RETURNS jsonb
 LANGUAGE plpgsql IMMUTABLE STRICT PARALLEL SAFE AS $$
 DECLARE
@@ -212,13 +212,13 @@ $$;
 
 
 CREATE AGGREGATE jsonb_stats_summary_agg(jsonb) (
-    sfunc = jsonb_stats_to_summary,
+    sfunc = jsonb_stats_summary_accum,
     stype = jsonb,
     initcond = '{}',
     finalfunc = jsonb_stats_to_summary_round
 );
 
-CREATE AGGREGATE jsonb_stats_summary_combine_agg(jsonb) (
+CREATE AGGREGATE jsonb_stats_summary_merge_agg(jsonb) (
     sfunc = jsonb_stats_summary_merge,
     stype = jsonb,
     initcond = '{}',
@@ -246,7 +246,7 @@ CREATE AGGREGATE jsonb_stats_agg_c(text, jsonb) (
     initcond = '{}'
 );
 
-CREATE FUNCTION jsonb_stats_to_summary_c(jsonb, jsonb)
+CREATE FUNCTION jsonb_stats_summary_accum_c(jsonb, jsonb)
 RETURNS jsonb
 AS 'MODULE_PATHNAME'
 LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
@@ -257,7 +257,7 @@ AS 'MODULE_PATHNAME'
 LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
 
 CREATE AGGREGATE jsonb_stats_summary_agg_c(jsonb) (
-    sfunc = jsonb_stats_to_summary_c,
+    sfunc = jsonb_stats_summary_accum_c,
     stype = jsonb,
     initcond = '{}',
     finalfunc = jsonb_stats_to_summary_round_c
@@ -268,7 +268,7 @@ RETURNS jsonb
 AS 'MODULE_PATHNAME'
 LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
 
-CREATE AGGREGATE jsonb_stats_summary_combine_agg_c(jsonb) (
+CREATE AGGREGATE jsonb_stats_summary_merge_agg_c(jsonb) (
     sfunc = jsonb_stats_summary_merge_c,
     stype = jsonb,
     initcond = '{}',

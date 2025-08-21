@@ -129,9 +129,9 @@ history_facet AS (
 ),
 history AS (
     SELECT
-        jsonb_stats_summary_combine_agg_c(hf.stats_summary) as stats_summary
+        jsonb_stats_summary_merge_agg_c(hf.stats_summary) as stats_summary
     FROM history_facet hf
 )
-SELECT jsonb_pretty(stats_summary)
+SELECT jsonb_pretty(stats_summary) as stats_summary
 FROM history;
 ROLLBACK;

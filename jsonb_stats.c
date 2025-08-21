@@ -8,7 +8,7 @@ PG_MODULE_MAGIC;
 // Function prototypes
 Datum stat_c(PG_FUNCTION_ARGS);
 Datum jsonb_stats_sfunc_c(PG_FUNCTION_ARGS);
-Datum jsonb_stats_to_summary_c(PG_FUNCTION_ARGS);
+Datum jsonb_stats_summary_accum_c(PG_FUNCTION_ARGS);
 Datum jsonb_stats_to_summary_round_c(PG_FUNCTION_ARGS);
 Datum jsonb_stats_summary_merge_c(PG_FUNCTION_ARGS);
 
@@ -36,9 +36,9 @@ jsonb_stats_sfunc_c(PG_FUNCTION_ARGS)
     PG_RETURN_JSONB_P(state);
 }
 
-PG_FUNCTION_INFO_V1(jsonb_stats_to_summary_c);
+PG_FUNCTION_INFO_V1(jsonb_stats_summary_accum_c);
 Datum
-jsonb_stats_to_summary_c(PG_FUNCTION_ARGS)
+jsonb_stats_summary_accum_c(PG_FUNCTION_ARGS)
 {
     Jsonb *state = PG_GETARG_JSONB_P(0);
     // Jsonb *stats = PG_GETARG_JSONB_P(1);

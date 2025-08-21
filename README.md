@@ -21,8 +21,23 @@ The extension revolves around three hierarchical JSONB structures:
 3.  **`stats_summary`**: An aggregate summary of multiple `stats` objects. It computes statistics like count, sum, min, and max, and is designed to be efficiently combined with other summaries. This is the result of the second and third levels of aggregation.
     ```json
     {
-      "num_employees": {"type": "integer_summary", "count": 3, "sum": 2700, "min": 50, "max": 2500},
-      "is_profitable": {"type": "boolean_summary", "true_count": 2, "false_count": 1}
+        "num_employees": {
+            "type": "integer_summary",
+            "count": 3,
+            "sum": 2700,
+            "min": 50,
+            "max": 2500,
+            "mean": 900.00,
+            "sum_sq_diff": 3845000.00
+        },
+        "is_profitable": {
+            "type": "boolean_summary",
+            "counts": { "true": 2, "false": 1 }
+        },
+        "industry": {
+            "type": "text_summary",
+            "counts": { "tech": 2, "finance": 1 }
+        }
     }
     ```
 
@@ -132,15 +147,15 @@ GROUP BY luh.valid_from, luh.valid_to, luh.region;
 
 -- Expected output for EU region:
 -- {
---   "num_employees": {"type": "integer_summary", "count": 2, "sum": 200, "min": 50, "max": 150},
---   "is_profitable": {"type": "boolean_summary", "true_count": 1, "false_count": 1},
---   "industry":      {"type": "text_summary", "distinct_values": 1, "values": ["tech"]}
+--   "num_employees": { "type": "integer_summary", "count": 2, "sum": 200, "min": 50, "max": 150, "mean": 100.00, "sum_sq_diff": 5000.00 },
+--   "is_profitable": { "type": "boolean_summary", "counts": { "true": 1, "false": 1 } },
+--   "industry":      { "type": "text_summary", "counts": { "tech": 2 } }
 -- }
 ```
 
 #### `history` (Level 3: `stats_summary` -> `stats_summary`)
 
-This final view creates a global summary. It can be generated either from the `stats` objects directly or, more efficiently, by combining the regional `stats_summary` objects using `jsonb_stats_summary_combine_agg(stats_summary)`.
+This final view creates a global summary. It can be generated either from the `stats` objects directly or, more efficiently, by combining the regional `stats_summary` objects using `jsonb_stats_summary_merge_agg(stats_summary)`.
 
 ```sql
 -- This view demonstrates combining faceted summaries into a global summary.
@@ -148,16 +163,11 @@ CREATE MATERIALIZED VIEW history AS
 SELECT
     hf.valid_from,
     hf.valid_to,
-    jsonb_stats_summary_combine_agg(hf.stats_summary) as stats_summary
+    jsonb_stats_summary_merge_agg(hf.stats_summary) as stats_summary
 FROM history_facet hf
 GROUP BY hf.valid_from, hf.valid_to;
 
--- The resulting global stats_summary:
--- {
---   "num_employees": {"type": "integer_summary", "count": 3, "sum": 2700, "min": 50, "max": 2500},
---   "is_profitable": {"type": "boolean_summary", "true_count": 2, "false_count": 1},
---   "industry":      {"type": "text_summary", "distinct_values": 2, "values": ["tech", "finance"]}
--- }
+-- The resulting global stats_summary is shown in the Core Concepts section.
 ```
 
 ## API
@@ -169,7 +179,7 @@ The extension will provide the following core functions and aggregates:
 *   **Aggregate Functions**:
     *   `jsonb_stats_agg(code text, stat jsonb)`: Aggregates `(code, stat)` pairs into a single `stats` object.
     *   `jsonb_stats_summary_agg(stats jsonb)`: Aggregates `stats` objects into a `stats_summary` object.
-    *   `jsonb_stats_summary_combine_agg(stats_summary jsonb)`: Combines multiple `stats_summary` objects into a single, higher-level summary.
+    *   `jsonb_stats_summary_merge_agg(stats_summary jsonb)`: Merges multiple `stats_summary` objects into a single, higher-level summary.
 
 ## Installation
 

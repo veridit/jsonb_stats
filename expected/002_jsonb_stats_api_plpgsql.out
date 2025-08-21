@@ -216,12 +216,12 @@ history_facet AS (
 ),
 history AS (
     SELECT
-        jsonb_stats_summary_combine_agg(hf.stats_summary) as stats_summary
+        jsonb_stats_summary_merge_agg(hf.stats_summary) as stats_summary
     FROM history_facet hf
 )
-SELECT jsonb_pretty(stats_summary)
+SELECT jsonb_pretty(stats_summary) as stats_summary
 FROM history;
-jsonb_pretty|{
+stats_summary|{
     "industry": {
         "type": "text_summary",
         "counts": {
