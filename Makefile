@@ -9,9 +9,9 @@ DOCS = README.md
 
 SQL_FILES = $(wildcard sql/[0-9]*_*.sql)
 
-REGRESS = $(if $(TESTS),$(TESTS),$(patsubst sql/%.sql,%,$(SQL_FILES)))
+REGRESS = $(if $(TESTS),$(TESTS),$(patsubst sql/%.sql,%,$(sort $(SQL_FILES))))
 
-OBJS = jsonb_stats.o $(WIN32RES)
+OBJS = jsonb_stats.o
 
 PG_CONFIG = pg_config
 PGXS := $(shell $(PG_CONFIG) --pgxs)
@@ -21,8 +21,17 @@ include $(PGXS)
 # To run all tests: `make test`
 # To run a single test: `make test TESTS=001_some_test`
 # To run a subset of tests: `make test TESTS="001_some_test 002_another_test"`
-.PHONY: test
-test: installcheck
+.PHONY: test setup_test_expected_files
+test: setup_test_expected_files installcheck
+
+# Create empty expected files for new tests if they don't exist.
+setup_test_expected_files:
+	mkdir -p expected
+	@for test in $(REGRESS); do \
+		if [ ! -f expected/$$test.out ]; then \
+			touch expected/$$test.out; \
+		fi; \
+	done
 
 # New target to run vimdiff for the first failing test
 vimdiff-fail-first:

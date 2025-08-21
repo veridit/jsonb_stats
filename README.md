@@ -60,10 +60,10 @@ CREATE TABLE stat_for_unit (
     value_date DATE,
     stat JSONB GENERATED ALWAYS AS (
         CASE
-            WHEN value_int IS NOT NULL THEN to_stat(value_int)
-            WHEN value_bool IS NOT NULL THEN to_stat(value_bool)
-            WHEN value_text IS NOT NULL THEN to_stat(value_text)
-            WHEN value_date IS NOT NULL THEN to_stat(value_date)
+            WHEN value_int IS NOT NULL THEN stat(value_int)
+            WHEN value_bool IS NOT NULL THEN stat(value_bool)
+            WHEN value_text IS NOT NULL THEN stat(value_text)
+            WHEN value_date IS NOT NULL THEN stat(value_date)
         END
     ) STORED,
     CONSTRAINT one_value_must_be_set CHECK (
@@ -74,15 +74,6 @@ CREATE TABLE stat_for_unit (
     )
 );
 
--- This helper function simulates how the extension would create a `stat` object.
-CREATE OR REPLACE FUNCTION to_stat(value anyelement) RETURNS jsonb AS $$
-BEGIN
-    RETURN jsonb_build_object(
-        'type', pg_typeof(value)::text,
-        'value', to_jsonb(value)
-    );
-END;
-$$ LANGUAGE plpgsql;
 
 -- Populate with data for the 2023 period
 INSERT INTO stat_for_unit (legal_unit_id, code, value_int, value_bool, value_text) VALUES
@@ -103,10 +94,9 @@ Next, we create materialized views to demonstrate the aggregation pipeline.
 
 #### `legal_unit_history` (Level 1: `stat` -> `stats`)
 
-This view uses `jsonb_stats_agg(stat)` to aggregate all individual `stat` values for a legal unit into a single `stats` object.
+This view uses `jsonb_stats_agg(code, stat)` to aggregate all individual `stat` values for a legal unit into a single `stats` object.
 
 ```sql
--- For this example, we'll simulate its behavior using `jsonb_object_agg`.
 CREATE MATERIALIZED VIEW legal_unit_history AS
 SELECT
     lu.legal_unit_id,
@@ -115,7 +105,7 @@ SELECT
     lu.valid_from,
     lu.valid_to,
     (
-        SELECT jsonb_object_agg(sfu.code, sfu.stat)
+        SELECT jsonb_stats_agg(sfu.code, sfu.stat)
         FROM stat_for_unit sfu
         WHERE sfu.legal_unit_id = lu.legal_unit_id
     ) AS stats
@@ -175,11 +165,11 @@ GROUP BY hf.valid_from, hf.valid_to;
 The extension will provide the following core functions and aggregates:
 
 *   **Constructor Function**:
-    *   `to_stat(anyelement)`: Creates a `stat` JSONB object from any scalar value.
+    *   `stat(anyelement)`: Creates a `stat` JSONB object from any scalar value.
 *   **Aggregate Functions**:
-    *   `jsonb_stats_agg(stat)`: Aggregates `stat` objects into a single `stats` object.
-    *   `jsonb_stats_summary_agg(stats)`: Aggregates `stats` objects into a `stats_summary` object.
-    *   `jsonb_stats_summary_combine_agg(stats_summary)`: Combines multiple `stats_summary` objects into a single, higher-level summary.
+    *   `jsonb_stats_agg(code text, stat jsonb)`: Aggregates `(code, stat)` pairs into a single `stats` object.
+    *   `jsonb_stats_summary_agg(stats jsonb)`: Aggregates `stats` objects into a `stats_summary` object.
+    *   `jsonb_stats_summary_combine_agg(stats_summary jsonb)`: Combines multiple `stats_summary` objects into a single, higher-level summary.
 
 ## Installation
 
