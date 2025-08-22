@@ -1,4 +1,4 @@
-read: [README.md, todo.md]
+read: [CONVENTIONS.md,README.md,REFERENCES.md]
 auto-commits: false
 auto-lint: false
 watch-files: true

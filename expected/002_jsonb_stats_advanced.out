@@ -1,0 +1,208 @@
+-- Test Setup
+CREATE EXTENSION IF NOT EXISTS jsonb_stats;
+CREATE TEMPORARY TABLE test_stats (
+    id integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    test_case integer,
+    stats jsonb
+);
+-- Insert test cases, adapted from statbus tests.
+INSERT INTO test_stats (test_case, stats) VALUES
+    (1, jsonb_build_object('num', stat(1), 'str', stat('a'::text), 'bool', stat(true))),
+    (1, jsonb_build_object('num', stat(2), 'str', stat('a'::text), 'bool', stat(false))),
+    (1, jsonb_build_object('num', stat(3), 'str', stat('b'::text), 'bool', stat(true))),
+    (2, jsonb_build_object('num', stat(0), 'str', stat('a'::text), 'bool', stat(true))),
+    (2, jsonb_build_object('num', stat(100), 'str', stat('b'::text), 'bool', stat(false))),
+    (2, jsonb_build_object('num', stat(200), 'str', stat('b'::text), 'bool', stat(true))),
+    (2, jsonb_build_object('num', stat(300), 'str', stat('c'::text), 'bool', stat(true))),
+    (2, jsonb_build_object('num', stat(400), 'str', stat('c'::text), 'bool', stat(false))),
+    (2, jsonb_build_object('num', stat(500), 'str', stat('c'::text), 'bool', stat(true))),
+    (2, jsonb_build_object('num', stat(600), 'str', stat('d'::text), 'bool', stat(true))),
+    (2, jsonb_build_object('num', stat(700), 'str', stat('d'::text), 'bool', stat(true))),
+    (2, jsonb_build_object('num', stat(800), 'str', stat('d'::text), 'bool', stat(false))),
+    (2, jsonb_build_object('num', stat(900), 'str', stat('d'::text), 'bool', stat(false))),
+    (4, jsonb_build_object('arr', stat(ARRAY[1, 2]::int[]))),
+    (4, jsonb_build_object('arr', stat(ARRAY[2, 3]::int[]))),
+    (5, jsonb_build_object('arr', stat(ARRAY['a', 'b']::text[]))),
+    (5, jsonb_build_object('arr', stat(ARRAY['b', 'c']::text[]))),
+    (6, jsonb_build_object('arr', stat(ARRAY[1, 2]::int[]), 'str', stat('a'::text))),
+    (6, jsonb_build_object('arr', stat(ARRAY[3]::int[]), 'str', stat('b'::text)));
+-- Create a reference view using standard SQL aggregates to validate the C implementation.
+CREATE TEMPORARY VIEW reference AS
+SELECT
+    test_case,
+    SUM((stats->'num'->>'value')::numeric) AS num_sum,
+    COUNT(stats->'num') AS num_count,
+    MIN((stats->'num'->>'value')::numeric) AS num_min,
+    MAX((stats->'num'->>'value')::numeric) AS num_max,
+    AVG((stats->'num'->>'value')::numeric) AS num_mean,
+    VARIANCE((stats->'num'->>'value')::numeric) AS num_variance,
+    STDDEV((stats->'num'->>'value')::numeric) AS num_stddev,
+    SUM(CASE WHEN (stats->'bool'->>'value')::boolean THEN 1 ELSE 0 END) AS bool_true_count,
+    SUM(CASE WHEN NOT (stats->'bool'->>'value')::boolean THEN 1 ELSE 0 END) AS bool_false_count,
+    COUNT(*) FILTER (WHERE stats->'str'->>'value' = 'a') AS str_a_count,
+    COUNT(*) FILTER (WHERE stats->'str'->>'value' = 'b') AS str_b_count,
+    COUNT(*) FILTER (WHERE stats->'str'->>'value' = 'c') AS str_c_count,
+    COUNT(*) FILTER (WHERE stats->'str'->>'value' = 'd') AS str_d_count
+FROM test_stats
+GROUP BY test_case
+ORDER BY test_case;
+-- Test cases
+\t \a \x
+-- Test 1: Basic iterative case
+SELECT '## C Implementation' as test_description, test_case FROM reference WHERE test_case = 1;
+test_description|## C Implementation
+test_case|1
+SELECT jsonb_pretty(jsonb_stats_summary_agg(stats)) AS computed_stats FROM test_stats WHERE test_case = 1;
+computed_stats|{
+    "num": {
+        "max": 3,
+        "min": 1,
+        "sum": 6,
+        "mean": 2.00,
+        "type": "integer_summary",
+        "count": 3,
+        "stddev": 1.00,
+        "variance": 1.00,
+        "sum_sq_diff": 2.00,
+        "coefficient_of_variation_pct": 50.00
+    },
+    "str": {
+        "type": "text_summary",
+        "counts": {
+            "a": 2,
+            "b": 1
+        }
+    },
+    "bool": {
+        "type": "boolean_summary",
+        "counts": {
+            "true": 2,
+            "false": 1
+        }
+    }
+}
+SELECT '## SQL Reference' as test_description, * FROM reference WHERE test_case = 1;
+test_description|## SQL Reference
+test_case|1
+num_sum|6
+num_count|3
+num_min|1
+num_max|3
+num_mean|2.0000000000000000
+num_variance|1.00000000000000000000
+num_stddev|1.00000000000000000000
+bool_true_count|2
+bool_false_count|1
+str_a_count|2
+str_b_count|1
+str_c_count|0
+str_d_count|0
+-- Test 2: More complex data
+SELECT '## C Implementation' as test_description, test_case FROM reference WHERE test_case = 2;
+test_description|## C Implementation
+test_case|2
+SELECT jsonb_pretty(jsonb_stats_summary_agg(stats)) AS computed_stats FROM test_stats WHERE test_case = 2;
+computed_stats|{
+    "num": {
+        "max": 900,
+        "min": 0,
+        "sum": 4500,
+        "mean": 450.00,
+        "type": "integer_summary",
+        "count": 10,
+        "stddev": 302.77,
+        "variance": 91666.67,
+        "sum_sq_diff": 825000.00,
+        "coefficient_of_variation_pct": 67.28
+    },
+    "str": {
+        "type": "text_summary",
+        "counts": {
+            "a": 1,
+            "b": 2,
+            "c": 3,
+            "d": 4
+        }
+    },
+    "bool": {
+        "type": "boolean_summary",
+        "counts": {
+            "true": 6,
+            "false": 4
+        }
+    }
+}
+SELECT '## SQL Reference' as test_description, * FROM reference WHERE test_case = 2;
+test_description|## SQL Reference
+test_case|2
+num_sum|4500
+num_count|10
+num_min|0
+num_max|900
+num_mean|450.0000000000000000
+num_variance|91666.666666666667
+num_stddev|302.765035409749
+bool_true_count|6
+bool_false_count|4
+str_a_count|1
+str_b_count|2
+str_c_count|3
+str_d_count|4
+-- Test 4: Array of numeric values
+SELECT '## C Implementation' as test_description, test_case FROM reference WHERE test_case = 4;
+test_description|## C Implementation
+test_case|4
+SELECT jsonb_pretty(jsonb_stats_summary_agg(stats)) FROM test_stats WHERE test_case = 4;
+jsonb_pretty|{
+    "arr": {
+        "type": "array_summary",
+        "count": 2,
+        "counts": {
+            "1": 1,
+            "2": 2,
+            "3": 1
+        },
+        "elements_count": 4
+    }
+}
+-- Test 5: Array of string values
+SELECT '## C Implementation' as test_description, test_case FROM reference WHERE test_case = 5;
+test_description|## C Implementation
+test_case|5
+SELECT jsonb_pretty(jsonb_stats_summary_agg(stats)) FROM test_stats WHERE test_case = 5;
+jsonb_pretty|{
+    "arr": {
+        "type": "array_summary",
+        "count": 2,
+        "counts": {
+            "a": 1,
+            "b": 2,
+            "c": 1
+        },
+        "elements_count": 4
+    }
+}
+-- Test 6: Merging summaries with different keys
+SELECT '## C Implementation' as test_description, test_case FROM reference WHERE test_case = 6;
+test_description|## C Implementation
+test_case|6
+SELECT jsonb_pretty(jsonb_stats_summary_agg(stats)) FROM test_stats WHERE test_case = 6;
+jsonb_pretty|{
+    "arr": {
+        "type": "array_summary",
+        "count": 2,
+        "counts": {
+            "1": 1,
+            "2": 1,
+            "3": 1
+        },
+        "elements_count": 3
+    },
+    "str": {
+        "type": "text_summary",
+        "counts": {
+            "a": 1,
+            "b": 1
+        }
+    }
+}

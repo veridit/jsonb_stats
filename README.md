@@ -1,6 +1,14 @@
 # jsonb_stats
 
-`jsonb_stats` is a PostgreSQL extension designed for efficient handling of statistical data. It provides a structured, multi-level approach to storing and aggregating statistical values within `jsonb` columns, making it ideal for analytics on dynamic variables without schema modifications.
+`jsonb_stats` is a PostgreSQL extension for efficient statistical aggregation. Its primary purpose is to enable analytics on a dynamic number of variables without requiring schema modifications, using a structured, multi-level approach to storing and aggregating data within `jsonb` columns.
+
+## Purpose-Driven Design
+
+The extension is built on two core principles that enable powerful, hierarchical analytics:
+
+1.  **Mergeable Summaries**: The statistical summaries (`stats_summary`) are designed to be efficiently combined. This is achieved by using online algorithms for calculating metrics like mean and variance (e.g., Welford's method). This feature is critical for building multi-level reports, such as aggregating daily data into monthly summaries, or regional data into a global summary, without reprocessing the raw data. This allows for the creation of faceted histories (`history_facet`) that can be drilled down into or rolled up.
+
+2.  **Normalized Change Detection**: The `integer_summary` includes the `coefficient_of_variation_pct`. This metric provides a standardized, unit-less measure of variability relative to the mean. It allows data analysts to quickly identify significant changes or volatility in a statistic, regardless of the actual scale of the underlying numbers, making it easier to pinpoint areas of interest in large datasets.
 
 ## Core Concepts
 
@@ -28,15 +36,18 @@ The extension revolves around three hierarchical JSONB structures:
             "min": 50,
             "max": 2500,
             "mean": 900.00,
-            "sum_sq_diff": 3845000.00
+            "sum_sq_diff": 3845000.00,
+            "variance": 1922500.00,
+            "stddev": 1386.54,
+            "coefficient_of_variation_pct": 154.06
         },
         "is_profitable": {
             "type": "boolean_summary",
-            "counts": { "true": 2, "false": 1 }
+            "counts": { "false": 1, "true": 2 }
         },
         "industry": {
             "type": "text_summary",
-            "counts": { "tech": 2, "finance": 1 }
+            "counts": { "finance": 1, "tech": 2 }
         }
     }
     ```
@@ -47,7 +58,7 @@ This example demonstrates how `jsonb_stats` can be used to track statistics for 
 
 ### 1. Source Tables
 
-First, we define our source tables. `stat_for_unit` uses a generated `stat` column, which would be created by the extension's `to_stat()` function.
+First, we define our source tables. `stat_for_unit` uses a generated `stat` column, which is created by the extension's `stat()` function.
 
 ```sql
 -- The legal_unit table tracks companies and their validity periods.
@@ -55,15 +66,15 @@ CREATE TABLE legal_unit (
     legal_unit_id INT,
     name TEXT,
     region TEXT,
-    valid_from DATE,
-    valid_to DATE
+    valid_from DATE NOT NULL,
+    valid_until DATE NOT NULL
 );
 
-INSERT INTO legal_unit (legal_unit_id, name, region, valid_from, valid_to) VALUES
-(1, 'Company A', 'EU', '2023-01-01', '2023-12-31'),
-(2, 'Company B', 'US', '2023-01-01', '2023-12-31'),
-(3, 'Company C', 'EU', '2023-01-01', '2023-12-31'),
-(1, 'Company A Rev.', 'EU', '2024-01-01', NULL); -- Company A was revised for the next period
+INSERT INTO legal_unit (legal_unit_id, name, region, valid_from, valid_until) VALUES
+(1, 'Company A', 'EU', '2023-01-01', '2024-01-01'),
+(2, 'Company B', 'US', '2023-01-01', '2024-01-01'),
+(3, 'Company C', 'EU', '2023-01-01', '2024-01-01'),
+(1, 'Company A Rev.', 'EU', '2024-01-01', 'infinity'); -- Company A was revised for the next period
 
 -- The stat_for_unit table holds raw statistical data.
 CREATE TABLE stat_for_unit (
@@ -118,7 +129,7 @@ SELECT
     lu.name,
     lu.region,
     lu.valid_from,
-    lu.valid_to,
+    lu.valid_until,
     (
         SELECT jsonb_stats_agg(sfu.code, sfu.stat)
         FROM stat_for_unit sfu
@@ -138,17 +149,21 @@ This view uses `jsonb_stats_summary_agg(stats)` to create a statistical summary 
 CREATE MATERIALIZED VIEW history_facet AS
 SELECT
     luh.valid_from,
-    luh.valid_to,
+    luh.valid_until,
     luh.region,
     jsonb_stats_summary_agg(luh.stats) as stats_summary
 FROM legal_unit_history luh
 WHERE luh.valid_from = '2023-01-01'
-GROUP BY luh.valid_from, luh.valid_to, luh.region;
+GROUP BY luh.valid_from, luh.valid_until, luh.region;
 
 -- Expected output for EU region:
 -- {
---   "num_employees": { "type": "integer_summary", "count": 2, "sum": 200, "min": 50, "max": 150, "mean": 100.00, "sum_sq_diff": 5000.00 },
---   "is_profitable": { "type": "boolean_summary", "counts": { "true": 1, "false": 1 } },
+--   "num_employees": {
+--     "type": "integer_summary", "count": 2, "sum": 200, "min": 50, "max": 150,
+--     "mean": 100.00, "sum_sq_diff": 5000.00, "variance": 5000.00, "stddev": 70.71,
+--     "coefficient_of_variation_pct": 70.71
+--   },
+--   "is_profitable": { "type": "boolean_summary", "counts": { "false": 1, "true": 1 } },
 --   "industry":      { "type": "text_summary", "counts": { "tech": 2 } }
 -- }
 ```
@@ -162,17 +177,127 @@ This final view creates a global summary. It can be generated either from the `s
 CREATE MATERIALIZED VIEW history AS
 SELECT
     hf.valid_from,
-    hf.valid_to,
+    hf.valid_until,
     jsonb_stats_summary_merge_agg(hf.stats_summary) as stats_summary
 FROM history_facet hf
-GROUP BY hf.valid_from, hf.valid_to;
+GROUP BY hf.valid_from, hf.valid_until;
 
 -- The resulting global stats_summary is shown in the Core Concepts section.
 ```
 
+### Structures in Detail
+
+The `stats_summary` object contains different summary structures depending on the data type being aggregated. The logic for these summaries is documented in `dev/reference_plpgsql.sql`.
+
+#### `integer_summary`
+Aggregates numeric values. The calculation methods are chosen specifically to support efficient, online aggregation and merging of summaries.
+- `count`: Number of values.
+- `sum`: The sum of all values.
+- `min`/`max`: The minimum and maximum values.
+- `mean`: The arithmetic mean, updated iteratively. ([Calculation Reference](https://en.wikipedia.org/wiki/Algorithms_for_calculating_variance#Online_algorithm))
+- `sum_sq_diff`: The sum of squared differences from the mean, calculated using [Welford's online algorithm](https://en.wikipedia.org/wiki/Algorithms_for_calculating_variance#Welford's_online_algorithm) to ensure numerical stability and mergeability.
+- `variance`: The sample variance.
+- `stddev`: The sample standard deviation.
+- `coefficient_of_variation_pct`: The coefficient of variation (CV), expressed as a percentage (`stddev / mean * 100`). This provides a standardized measure of dispersion.
+
+**Example:**
+Given three `stats` objects:
+`{"reading": stat(10)}`
+`{"reading": stat(5)}`
+`{"reading": stat(20)}`
+
+The resulting `integer_summary` would be:
+```json
+{
+    "reading": {
+        "type": "integer_summary",
+        "count": 3,
+        "sum": 35,
+        "min": 5,
+        "max": 20,
+        "mean": 11.67,
+        "sum_sq_diff": 116.67,
+        "variance": 58.33,
+        "stddev": 7.64,
+        "coefficient_of_variation_pct": 65.47
+    }
+}
+```
+
+#### `text_summary` / `boolean_summary`
+Aggregates string or boolean values.
+- `counts`: A JSONB object where keys are the distinct values and values are their frequencies.
+
+**Example (`text_summary`):**
+Given three `stats` objects:
+`{"category": stat('apple'::text)}`
+`{"category": stat('banana'::text)}`
+`{"category": stat('apple'::text)}`
+
+The resulting `text_summary` would be:
+```json
+{
+    "category": {
+        "type": "text_summary",
+        "counts": {
+            "apple": 2,
+            "banana": 1
+        }
+    }
+}
+```
+
+**Example (`boolean_summary`):**
+Given three `stats` objects:
+`{"is_active": stat(true)}`
+`{"is_active": stat(false)}`
+`{"is_active": stat(true)}`
+
+The resulting `boolean_summary` would be:
+```json
+{
+    "is_active": {
+        "type": "boolean_summary",
+        "counts": {
+            "false": 1,
+            "true": 2
+        }
+    }
+}
+```
+
+#### `array_summary`
+Aggregates array values.
+- `count`: The number of arrays that have been processed. For example, aggregating two separate arrays results in `count: 2`.
+- `elements_count`: The sum of the number of elements from all processed arrays.
+- `counts`: A JSONB object tracking the frequency of each unique element across all arrays.
+
+**Example:**
+Given three `stats` objects:
+`{"tags": stat(ARRAY[1, 2])}`
+`{"tags": stat(ARRAY[2, 3])}`
+`{"tags": stat(ARRAY[3, 4])}`
+
+The resulting `array_summary` would be:
+```json
+{
+    "tags": {
+        "type": "array_summary",
+        "count": 3,
+        "elements_count": 6,
+        "counts": {
+            "1": 1,
+            "2": 2,
+            "3": 2,
+            "4": 1
+        }
+    }
+}
+```
+
 ## API
 
-The extension will provide the following core functions and aggregates:
+The extension provides the following core functions and aggregates:
 
 *   **Constructor Function**:
     *   `stat(anyelement)`: Creates a `stat` JSONB object from any scalar value.
@@ -183,17 +308,20 @@ The extension will provide the following core functions and aggregates:
 
 ## Installation
 
+To build and install the extension from source, run:
 ```sh
-# TBD:
-make && make install
-psql -c "CREATE EXTENSION jsonb_stats;"
+make install
+```
+
+Then, connect to your PostgreSQL database and enable the extension:
+```sql
+CREATE EXTENSION jsonb_stats;
 ```
 
 ## Development
 
-This extension is developed as a standard PostgreSQL C extension.
+This extension is developed as a standard PostgreSQL C extension. To run the full regression test suite:
 
 ```sh
-# To run tests:
-make && make installcheck
+make install && make test
 ```

@@ -3,6 +3,47 @@
 ## Introduction
 This document outlines the standard operating procedure for all AI agents contributing to this project. Adhering to these conventions ensures a systematic, verifiable, and robust development process.
 
+## Tool Usage
+When you suggest commands in your regular response (*NOT* inside a `SEARCH/REPLACE` block), format them inside `bash` blocks:
+```bash
+cmd1
+cmd2
+```
+These commands are then presented to the user, who can accept them for execution, and the results are returned to you.
+
+Key tools available for you to suggest:
+- **`rg` (ripgrep)**: Your primary tool for fast, powerful code searching. Use it to find definitions, locate files, or understand code relationships.
+- **`tree`**: List files to understand directory structures.
+- **`head`**: Inspect the beginning of files to quickly understand their structure and content.
+- **`ls`**: Check file sizes to determine if they should be read or inspected.
+- **`psql`**: Run arbitrary SQL for debugging or inspection (e.g., `echo 'SELECT * FROM pg_extension;' | psql -d contrib_regression`).
+
+For file system operations and large-scale edits, prefer suggesting shell commands over generating `SEARCH/REPLACE` blocks where appropriate. This is faster and more efficient.
+- Use `rm` to delete files and `git mv` to move or rename them.
+- For simple content replacement (e.g., replacing an entire file's contents), `echo "new content" > filename` can be used instead of a large `SEARCH/REPLACE` block.
+- For large-scale, repetitive search-and-replace operations across multiple files, powerful tools like `ruplacer` and `renamer` are available and should be used.
+
+## Coding Standards
+
+### C Code (PostgreSQL Extensions)
+- **C99 Compliance:** All C code must be compatible with the C99 standard. The build process uses the `-Wdeclaration-after-statement` flag, which will generate a warning if variable declarations are mixed with code.
+  - **Rule:** Declare all variables at the beginning of a block (immediately after a `{`). Do not mix declarations and executable statements.
+- **PostgreSQL Coding Conventions:** Adhere to the formatting and naming conventions outlined in the official [PostgreSQL Documentation](https://www.postgresql.org/docs/current/source.html). This includes conventions for variable names, function names, and code layout.
+
+### SQL Conventions
+- **Function/Procedure Definitions**:
+    - Use the function/procedure name in the literal string quote for the body (e.g., `AS $my_function_name$`).
+    - Specify `LANGUAGE plpgsql` (or other) before the body.
+    - Use the long form for parameters for documentation clarity (e.g., `param_name param_type`).
+- **Function Calls**: For calls with 3+ arguments, use named arguments (e.g., `arg1 => val1`).
+- **String Literals for `format()`**:
+    - Always prefer dollar-quoting (e.g., `format($$ ... $$)`) for the main dynamic SQL string. This avoids having to escape single quotes inside the SQL.
+    - **Nesting**: When nesting dollar-quoted strings, use named dollar quotes for the outer string to avoid conflicts (e.g., `$SQL$`).
+    - For `format()` calls with multiple parameters, use numbered placeholders for clarity:
+      - `%1$I` for the 1st parameter as an identifier, `%2$L` for the 2nd as a literal, `%3$s` for the 3rd as a plain string, etc.
+      - Keep the SQL readable by aligning numbered placeholders with inline comments that show which parameter they refer to (e.g., `... %1$I ... /* %1$I */`).
+- **Table Aliases**: Prefer explicit `AS` for table aliases, e.g., `FROM my_table AS mt`.
+
 ## Guiding Principles
 
 ### 1. Maintain a Stateless Mindset
@@ -28,7 +69,11 @@ All development work, especially bug fixing, must follow this iterative cycle. D
 
 ### 4. Gather Real-World Data
 - **Action:** After the user applies the changes, request that they run the relevant tests or commands to gather empirical evidence of the change's impact.
-- **Example:** "Please run `make install && make installcheck` to verify the fix."
+- **Standard Command Format:** Always use the following command structure to run tests. This ensures the extension is installed before testing and that any failures are immediately diffed for analysis.
+  - **Command:** `make install && make test ...; make diff-fail-all`
+  - **Usage:**
+    - To run all tests: `make install && make test; make diff-fail-all`
+    - To run specific tests: `make install && make test TESTS="001_jsonb_stats_api 003_readme_scenario"; make diff-fail-all`
 
 ### 5. Analyze Results and Verify Hypothesis
 - **Action:** Carefully inspect the output of the tests or commands. Compare the actual results against the expected outcome from Step 3.
@@ -44,6 +89,13 @@ All development work, especially bug fixing, must follow this iterative cycle. D
   - **For other documentation:** Update any other relevant documents, such as `README.md` or design documents.
 
 By strictly following this process, we ensure that progress is real, verifiable, and that the project's state remains consistently stable.
+
+## General Development Principles
+- **Fail Fast**:
+  - Functionality that is expected to work should fail immediately and clearly if an unexpected state or error occurs.
+  - Do not mask or work around problems; instead, provide sufficient error or debugging information to facilitate a solution. This is crucial for maintaining system integrity and simplifying troubleshooting, especially in backend processes and SQL procedures.
+- **Declarative Transparency**:
+  - Where possible, store the inputs and intermediate results of complex calculations directly on the relevant records. This makes the system's state self-documenting and easier to debug, inspect, and trust, rather than relying on dynamic calculations that can appear magical.
 
 ### The "Observe, Verify, Implement" Protocol for Complex Changes
 When a task is complex or has a history of regressions, a more rigorous, data-driven protocol is required to avoid speculative fixes. This protocol is a practical application of the "Observe first, then change" principle.
