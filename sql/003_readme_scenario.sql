@@ -1,5 +1,5 @@
 BEGIN;
-CREATE EXTENSION IF NOT EXISTS jsonb_stats;
+CREATE EXTENSION jsonb_stats;
 
 -- This test implements the full example scenario from README.md,
 -- using materialized views to demonstrate the aggregation pipeline.

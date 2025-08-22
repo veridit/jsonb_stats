@@ -1,5 +1,6 @@
+BEGIN;
 -- Test Setup
-CREATE EXTENSION IF NOT EXISTS jsonb_stats;
+CREATE EXTENSION jsonb_stats;
 
 CREATE TEMPORARY TABLE test_stats (
     id integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
@@ -74,3 +75,5 @@ SELECT jsonb_pretty(jsonb_stats_summary_agg(stats)) FROM test_stats WHERE test_c
 -- Test 6: Merging summaries with different keys
 SELECT '## C Implementation' as test_description, test_case FROM reference WHERE test_case = 6;
 SELECT jsonb_pretty(jsonb_stats_summary_agg(stats)) FROM test_stats WHERE test_case = 6;
+
+ROLLBACK;

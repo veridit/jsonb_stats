@@ -27,3 +27,7 @@ This file tracks the major development tasks for the `jsonb_stats` extension.
 -   [x] Enhance C array summary to match `statbus` reference (unique element counts).
 -   [x] Refactor tests to use a `reference` view for validation, based on `statbus`.
 -   [x] Create a new regression test (`003`) that implements the full example scenario from the `README.md`.
+-   [x] Add benchmark test comparing C and PL/pgSQL performance.
+-   [x] Improve `Makefile` with `fast`/`TESTS` targets and robust test execution.
+-   [x] Align examples and tests with `sql_saga` temporal conventions.
+-   [x] Improve test isolation using transactions and a dedicated regression database.

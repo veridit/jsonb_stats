@@ -1,5 +1,6 @@
+BEGIN;
 -- Test Setup
-CREATE EXTENSION IF NOT EXISTS jsonb_stats;
+CREATE EXTENSION jsonb_stats;
 CREATE TEMPORARY TABLE test_stats (
     id integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     test_case integer,
@@ -206,3 +207,4 @@ jsonb_pretty|{
         }
     }
 }
+ROLLBACK;

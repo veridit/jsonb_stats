@@ -1,6 +1,5 @@
 BEGIN;
-CREATE EXTENSION IF NOT EXISTS jsonb_stats;
-NOTICE:  extension "jsonb_stats" already exists, skipping
+CREATE EXTENSION jsonb_stats;
 -- This test implements the full example scenario from README.md,
 -- using materialized views to demonstrate the aggregation pipeline.
 -- From README.md: 1. Source Tables

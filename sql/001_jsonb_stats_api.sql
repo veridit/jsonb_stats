@@ -7,15 +7,15 @@ CREATE TABLE legal_unit (
     legal_unit_id INT,
     name TEXT,
     region TEXT,
-    valid_from DATE,
-    valid_to DATE
+    valid_from DATE NOT NULL,
+    valid_until DATE NOT NULL
 );
 
-INSERT INTO legal_unit (legal_unit_id, name, region, valid_from, valid_to) VALUES
-(1, 'Company A', 'EU', '2023-01-01', '2023-12-31'),
-(2, 'Company B', 'US', '2023-01-01', '2023-12-31'),
-(3, 'Company C', 'EU', '2023-01-01', '2023-12-31'),
-(1, 'Company A Rev.', 'EU', '2024-01-01', NULL); -- Company A was revised for the next period
+INSERT INTO legal_unit (legal_unit_id, name, region, valid_from, valid_until) VALUES
+(1, 'Company A', 'EU', '2023-01-01', '2024-01-01'),
+(2, 'Company B', 'US', '2023-01-01', '2024-01-01'),
+(3, 'Company C', 'EU', '2023-01-01', '2024-01-01'),
+(1, 'Company A Rev.', 'EU', '2024-01-01', 'infinity'); -- Company A was revised for the next period
 
 -- The stat_for_unit table holds raw statistical data.
 CREATE TABLE stat_for_unit (

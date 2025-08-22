@@ -1,0 +1,7 @@
+event|C implementation end
+duration|3.61 secs
+throughput|~2800 rows/s
+
+event|PL/pgSQL implementation end
+duration|18.82 secs
+throughput|~500 rows/s
