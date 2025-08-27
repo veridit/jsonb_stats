@@ -22,12 +22,16 @@ CREATE TABLE stat_for_unit (
     legal_unit_id INT,
     code TEXT,
     value_int INT,
+    value_float FLOAT,
+    value_numeric NUMERIC(10,2),
     value_bool BOOLEAN,
     value_text TEXT,
     value_date DATE,
     stat JSONB GENERATED ALWAYS AS (
         CASE
             WHEN value_int IS NOT NULL THEN stat(value_int)
+            WHEN value_float IS NOT NULL THEN stat(value_float)
+            WHEN value_numeric IS NOT NULL THEN stat(value_numeric)
             WHEN value_bool IS NOT NULL THEN stat(value_bool)
             WHEN value_text IS NOT NULL THEN stat(value_text)
             WHEN value_date IS NOT NULL THEN stat(value_date)
@@ -35,6 +39,8 @@ CREATE TABLE stat_for_unit (
     ) STORED,
     CONSTRAINT one_value_must_be_set CHECK (
         (value_int IS NOT NULL)::int +
+        (value_float IS NOT NULL)::int +
+        (value_numeric IS NOT NULL)::int +
         (value_bool IS NOT NULL)::int +
         (value_text IS NOT NULL)::int +
         (value_date IS NOT NULL)::int = 1
@@ -42,16 +48,32 @@ CREATE TABLE stat_for_unit (
 );
 
 -- Populate with data for the 2023 period
-INSERT INTO stat_for_unit (legal_unit_id, code, value_int, value_bool, value_text) VALUES
-(1, 'num_employees', 150, NULL, NULL),
-(1, 'is_profitable', NULL, true, NULL),
-(1, 'industry', NULL, NULL, 'tech'),
-(2, 'num_employees', 2500, NULL, NULL),
-(2, 'is_profitable', NULL, true, NULL),
-(2, 'industry', NULL, NULL, 'finance'),
-(3, 'num_employees', 50, NULL, NULL),
-(3, 'is_profitable', NULL, false, NULL),
-(3, 'industry', NULL, NULL, 'tech');
+INSERT INTO stat_for_unit (legal_unit_id, code, value_int) VALUES
+(1, 'num_employees', 150),
+(2, 'num_employees', 2500),
+(3, 'num_employees', 50);
+
+INSERT INTO stat_for_unit (legal_unit_id, code, value_bool) VALUES
+(1, 'is_profitable', true),
+(2, 'is_profitable', true),
+(3, 'is_profitable', false);
+
+INSERT INTO stat_for_unit (legal_unit_id, code, value_text) VALUES
+(1, 'industry', 'tech'),
+(2, 'industry', 'finance'),
+(3, 'industry', 'tech');
+
+INSERT INTO stat_for_unit (legal_unit_id, code, value_float) VALUES
+(1, 'turnover', 123456.78),
+(2, 'turnover', 987654.32);
+
+INSERT INTO stat_for_unit (legal_unit_id, code, value_numeric) VALUES
+(1, 'pct_foreign_workers', 25.50),
+(2, 'pct_foreign_workers', 10.00);
+
+INSERT INTO stat_for_unit (legal_unit_id, code, value_date) VALUES
+(1, 'start_date', '2010-01-01'),
+(3, 'start_date', '2015-06-15');
 
 -- Test cases
 -- Show results suitable for jsonb_pretty for easy diffing.
@@ -78,8 +100,8 @@ FROM legal_unit_history
 ORDER BY legal_unit_id;
 
 
--- Test Level 2: stats -> stats_summary
--- Create `stats_summary` for each region.
+-- Test Level 2: stats -> stats_agg
+-- Create `stats_agg` for each region.
 WITH legal_unit_history AS (
     SELECT
         lu.legal_unit_id,
@@ -96,16 +118,16 @@ WITH legal_unit_history AS (
 history_facet AS (
     SELECT
         luh.region,
-        jsonb_stats_summary_agg(luh.stats) as stats_summary
+        jsonb_stats_agg(luh.stats) as stats_agg
     FROM legal_unit_history luh
     GROUP BY luh.region
 )
-SELECT region, jsonb_pretty(stats_summary) as stats_summary
+SELECT region, jsonb_pretty(stats_agg) as stats_agg
 FROM history_facet
 ORDER BY region;
 
 
--- Test Level 3: stats_summary -> stats_summary
+-- Test Level 3: stats_agg -> stats_agg
 -- Combine regional summaries into a global summary.
 WITH legal_unit_history AS (
     SELECT
@@ -123,15 +145,15 @@ WITH legal_unit_history AS (
 history_facet AS (
     SELECT
         luh.region,
-        jsonb_stats_summary_agg(luh.stats) as stats_summary
+        jsonb_stats_agg(luh.stats) as stats_agg
     FROM legal_unit_history luh
     GROUP BY luh.region
 ),
 history AS (
     SELECT
-        jsonb_stats_summary_merge_agg(hf.stats_summary) as stats_summary
+        jsonb_stats_merge_agg(hf.stats_agg) as stats_agg
     FROM history_facet hf
 )
-SELECT jsonb_pretty(stats_summary) as stats_summary
+SELECT jsonb_pretty(stats_agg) as stats_agg
 FROM history;
 ROLLBACK;

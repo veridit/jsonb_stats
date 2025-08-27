@@ -25,12 +25,16 @@ CREATE TABLE stat_for_unit (
     legal_unit_id INT,
     code TEXT,
     value_int INT,
+    value_float FLOAT,
+    value_numeric NUMERIC(10,2),
     value_bool BOOLEAN,
     value_text TEXT,
     value_date DATE,
     stat JSONB GENERATED ALWAYS AS (
         CASE
             WHEN value_int IS NOT NULL THEN stat(value_int)
+            WHEN value_float IS NOT NULL THEN stat(value_float)
+            WHEN value_numeric IS NOT NULL THEN stat(value_numeric)
             WHEN value_bool IS NOT NULL THEN stat(value_bool)
             WHEN value_text IS NOT NULL THEN stat(value_text)
             WHEN value_date IS NOT NULL THEN stat(value_date)
@@ -38,6 +42,8 @@ CREATE TABLE stat_for_unit (
     ) STORED,
     CONSTRAINT one_value_must_be_set CHECK (
         (value_int IS NOT NULL)::int +
+        (value_float IS NOT NULL)::int +
+        (value_numeric IS NOT NULL)::int +
         (value_bool IS NOT NULL)::int +
         (value_text IS NOT NULL)::int +
         (value_date IS NOT NULL)::int = 1
@@ -46,18 +52,24 @@ CREATE TABLE stat_for_unit (
 
 
 -- Populate with data for the 2023 period
-INSERT INTO stat_for_unit (legal_unit_id, code, value_int, value_bool, value_text) VALUES
-(1, 'num_employees', 150, NULL, NULL),
-(1, 'is_profitable', NULL, true, NULL),
-(1, 'industry', NULL, NULL, 'tech'),
-(2, 'num_employees', 2500, NULL, NULL),
-(2, 'is_profitable', NULL, true, NULL),
-(2, 'industry', NULL, NULL, 'finance'),
-(3, 'num_employees', 50, NULL, NULL),
-(3, 'is_profitable', NULL, false, NULL),
-(3, 'industry', NULL, NULL, 'tech');
+INSERT INTO stat_for_unit (legal_unit_id, code, value_int) VALUES
+(1, 'num_employees', 150),
+(2, 'num_employees', 2500),
+(3, 'num_employees', 50);
 
--- From README.md: 2. Aggregation Views
+INSERT INTO stat_for_unit (legal_unit_id, code, value_bool) VALUES
+(1, 'is_profitable', true),
+(2, 'is_profitable', true),
+(3, 'is_profitable', false);
+
+INSERT INTO stat_for_unit (legal_unit_id, code, value_text) VALUES
+(1, 'industry', 'tech'),
+(2, 'industry', 'finance'),
+(3, 'industry', 'tech');
+
+INSERT INTO stat_for_unit (legal_unit_id, code, value_float) VALUES
+(1, 'turnover', 123456.78),
+(2, 'turnover', 987654.32);
 
 -- legal_unit_history (Level 1: stat -> stats)
 CREATE MATERIALIZED VIEW legal_unit_history AS
@@ -76,23 +88,23 @@ FROM
     legal_unit lu
 WHERE lu.valid_from = '2023-01-01';
 
--- history_facet (Level 2: stats -> stats_summary)
+-- history_facet (Level 2: stats -> stats_agg)
 CREATE MATERIALIZED VIEW history_facet AS
 SELECT
     luh.valid_from,
     luh.valid_until,
     luh.region,
-    jsonb_stats_summary_agg(luh.stats) as stats_summary
+    jsonb_stats_agg(luh.stats) as stats_agg
 FROM legal_unit_history luh
 WHERE luh.valid_from = '2023-01-01'
 GROUP BY luh.valid_from, luh.valid_until, luh.region;
 
--- history (Level 3: stats_summary -> stats_summary)
+-- history (Level 3: stats_agg -> stats_agg)
 CREATE MATERIALIZED VIEW history AS
 SELECT
     hf.valid_from,
     hf.valid_until,
-    jsonb_stats_summary_merge_agg(hf.stats_summary) as stats_summary
+    jsonb_stats_merge_agg(hf.stats_agg) as stats_agg
 FROM history_facet hf
 GROUP BY hf.valid_from, hf.valid_until;
 
@@ -105,15 +117,15 @@ SELECT legal_unit_id, jsonb_pretty(stats) as stats
 FROM legal_unit_history
 ORDER BY legal_unit_id;
 
--- Test Level 2: stats -> stats_summary from history_facet
+-- Test Level 2: stats -> stats_agg from history_facet
 SELECT '## Level 2: history_facet' as test_description;
-SELECT region, jsonb_pretty(stats_summary) as stats_summary
+SELECT region, jsonb_pretty(stats_agg) as stats_agg
 FROM history_facet
 ORDER BY region;
 
--- Test Level 3: stats_summary -> stats_summary from history
+-- Test Level 3: stats_agg -> stats_agg from history
 SELECT '## Level 3: history' as test_description;
-SELECT jsonb_pretty(stats_summary) as stats_summary
+SELECT jsonb_pretty(stats_agg) as stats_agg
 FROM history;
 
 ROLLBACK;

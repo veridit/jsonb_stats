@@ -17,6 +17,7 @@ INSERT INTO benchmark (event, row_count) VALUES ('BEGIN', 0);
 -- Generate 10k rows of test data
 INSERT INTO test_data (stats)
 SELECT jsonb_build_object(
+    'type', 'stats',
     'num', stat(floor(random() * 1000)::int),
     'str', stat(substr(md5(random()::text), 1, 5)),
     'bool', stat(random() > 0.5)
@@ -26,19 +27,19 @@ INSERT INTO benchmark (event, row_count) VALUES ('Data generated', (SELECT COUNT
 
 -- Benchmark C implementation
 INSERT INTO benchmark (event, row_count) VALUES ('C implementation start', 0);
-SELECT jsonb_stats_summary_agg(stats) INTO TEMP TABLE c_result FROM test_data;
+SELECT jsonb_stats_agg(stats) INTO TEMP TABLE c_result FROM test_data;
 INSERT INTO benchmark (event, row_count) VALUES ('C implementation end', (SELECT COUNT(*) FROM test_data));
 
 -- Benchmark PL/pgSQL implementation
 INSERT INTO benchmark (event, row_count) VALUES ('PL/pgSQL implementation start', 0);
-SELECT jsonb_stats_summary_agg_plpgsql(stats) INTO TEMP TABLE plpgsql_result FROM test_data;
+SELECT jsonb_stats_agg_plpgsql(stats) INTO TEMP TABLE plpgsql_result FROM test_data;
 INSERT INTO benchmark (event, row_count) VALUES ('PL/pgSQL implementation end', (SELECT COUNT(*) FROM test_data));
 
 -- Correctness check: ensure C and PL/pgSQL produce same counts.
 CREATE TEMPORARY VIEW comparison AS
 SELECT
-    (c_result.jsonb_stats_summary_agg->'num'->>'count')::int AS c_num_count,
-    (plpgsql_result.jsonb_stats_summary_agg_plpgsql->'num'->>'count')::int AS p_num_count
+    (c_result.jsonb_stats_agg->'num'->>'count')::int AS c_num_count,
+    (plpgsql_result.jsonb_stats_agg_plpgsql->'num'->>'count')::int AS p_num_count
 FROM c_result, plpgsql_result;
 
 -- This output is stable and goes into the regression test's expected file.
