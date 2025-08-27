@@ -10,6 +10,17 @@ RETURNS jsonb
 AS 'MODULE_PATHNAME'
 LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
 
+CREATE FUNCTION stats(jsonb)
+RETURNS jsonb
+AS 'MODULE_PATHNAME'
+LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+-- Overloaded helper function to create a single-key `stats` object
+CREATE FUNCTION stats(code text, val anyelement)
+RETURNS jsonb
+AS $$ SELECT stats(jsonb_build_object(code, stat(val))) $$
+LANGUAGE SQL IMMUTABLE STRICT PARALLEL SAFE;
+
 CREATE FUNCTION jsonb_stats_sfunc(jsonb, text, jsonb)
 RETURNS jsonb
 AS 'MODULE_PATHNAME'
@@ -21,31 +32,31 @@ CREATE AGGREGATE jsonb_stats_agg(text, jsonb) (
     initcond = '{}'
 );
 
-CREATE FUNCTION jsonb_stats_summary_accum(jsonb, jsonb)
+CREATE FUNCTION jsonb_stats_accum(jsonb, jsonb)
 RETURNS jsonb
 AS 'MODULE_PATHNAME'
 LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
 
-CREATE FUNCTION jsonb_stats_to_summary_round(jsonb)
+CREATE FUNCTION jsonb_stats_final(jsonb)
 RETURNS jsonb
 AS 'MODULE_PATHNAME'
 LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
 
-CREATE AGGREGATE jsonb_stats_summary_agg(jsonb) (
-    sfunc = jsonb_stats_summary_accum,
+CREATE AGGREGATE jsonb_stats_agg(jsonb) (
+    sfunc = jsonb_stats_accum,
     stype = jsonb,
     initcond = '{}',
-    finalfunc = jsonb_stats_to_summary_round
+    finalfunc = jsonb_stats_final
 );
 
-CREATE FUNCTION jsonb_stats_summary_merge(jsonb, jsonb)
+CREATE FUNCTION jsonb_stats_merge(jsonb, jsonb)
 RETURNS jsonb
 AS 'MODULE_PATHNAME'
 LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
 
-CREATE AGGREGATE jsonb_stats_summary_merge_agg(jsonb) (
-    sfunc = jsonb_stats_summary_merge,
+CREATE AGGREGATE jsonb_stats_merge_agg(jsonb) (
+    sfunc = jsonb_stats_merge,
     stype = jsonb,
     initcond = '{}',
-    finalfunc = jsonb_stats_to_summary_round
+    finalfunc = jsonb_stats_final
 );
