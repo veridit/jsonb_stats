@@ -20,6 +20,15 @@ REGRESS_OPTS = --dbname=jsonb_stats_regression
 
 PG_CONFIG = pg_config
 PGXS := $(shell $(PG_CONFIG) --pgxs)
+
+# Dynamic analysis with AddressSanitizer (ASan)
+# To use, run: make test-asan
+# This builds the extension with memory error detectors and runs the tests.
+ifeq ($(SANITIZE),true)
+	CFLAGS += -fsanitize=address -fno-omit-frame-pointer
+	SHLIB_LINK += -fsanitize=address
+endif
+
 include $(PGXS)
 
 # test is a convenient alias for installcheck.
@@ -46,7 +55,7 @@ fast:
 	@:
 
 # Target to show diff for all failing tests. Use `make diff-fail-all vim` for vimdiff.
-.PHONY: diff-fail-all vim
+.PHONY: diff-fail-all vim tidy test-asan
 diff-fail-all:
 ifeq (vim,$(filter vim,$(MAKECMDGOALS)))
 	@grep 'not ok' regression.out 2>/dev/null | awk 'BEGIN { FS = "[[:space:]]+" } {print $$5}' | while read test; do \
@@ -71,3 +80,20 @@ endif
 
 vim:
 	@:
+
+# Target for static analysis using clang-tidy
+tidy:
+	@echo "Running clang-tidy..."
+	@clang-tidy $(firstword $(OBJS:.o=.c)) -- $(CFLAGS)
+
+# Target for dynamic analysis using AddressSanitizer (ASan)
+test-asan:
+	@echo "Running tests with AddressSanitizer..."
+	@$(MAKE) clean > /dev/null
+	@$(MAKE) SANITIZE=true test || true
+	@echo
+	@echo "======================================================================="
+	@echo "--- ASan logs (if any) from regression.log ---"
+	@echo "======================================================================="
+	@cat regression.log || true
+	@echo "======================================================================="
