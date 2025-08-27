@@ -6,9 +6,9 @@
 
 The extension is built on two core principles that enable powerful, hierarchical analytics:
 
-1.  **Mergeable Summaries**: The statistical summaries (`stats_summary`) are designed to be efficiently combined. This is achieved by using online algorithms for calculating metrics like mean and variance (e.g., Welford's method). This feature is critical for building multi-level reports, such as aggregating daily data into monthly summaries, or regional data into a global summary, without reprocessing the raw data. This allows for the creation of faceted histories (`history_facet`) that can be drilled down into or rolled up.
+1.  **Mergeable Summaries**: The statistical summaries (`stats_agg`) are designed to be efficiently combined. This is achieved by using online algorithms for calculating metrics like mean and variance (e.g., Welford's method). This feature is critical for building multi-level reports, such as aggregating daily data into monthly summaries, or regional data into a global summary, without reprocessing the raw data. This allows for the creation of faceted histories (`history_facet`) that can be drilled down into or rolled up.
 
-2.  **Normalized Change Detection**: The `integer_summary` includes the `coefficient_of_variation_pct`. This metric provides a standardized, unit-less measure of variability relative to the mean. It allows data analysts to quickly identify significant changes or volatility in a statistic, regardless of the actual scale of the underlying numbers, making it easier to pinpoint areas of interest in large datasets.
+2.  **Normalized Change Detection**: The `int_agg` summary includes the `coefficient_of_variation_pct`. This metric provides a standardized, unit-less measure of variability relative to the mean. It allows data analysts to quickly identify significant changes or volatility in a statistic, regardless of the actual scale of the underlying numbers, making it easier to pinpoint areas of interest in large datasets.
 
 ## Core Concepts
 
@@ -16,37 +16,39 @@ The extension revolves around three hierarchical JSONB structures:
 
 1.  **`stat`**: Represents a single statistical value, preserving its original data type.
     ```json
-    {"type": "integer", "value": 150}
+    {"type": "int", "value": 150}
     ```
-2.  **`stats`**: A collection of named `stat` objects for a single entity (e.g., a company at a point in time). This is the result of the first level of aggregation.
+2.  **`stats`**: A collection of named `stat` objects for a single entity, identified by `type: "stats"`.
     ```json
     {
-      "num_employees": {"type": "integer", "value": 150},
-      "is_profitable": {"type": "boolean", "value": true},
-      "industry":      {"type": "text",    "value": "tech"}
+      "type": "stats",
+      "num_employees": {"type": "int", "value": 150},
+      "is_profitable": {"type": "bool", "value": true},
+      "industry":      {"type": "str",    "value": "tech"}
     }
     ```
-3.  **`stats_summary`**: An aggregate summary of multiple `stats` objects. It computes statistics like count, sum, min, and max, and is designed to be efficiently combined with other summaries. This is the result of the second and third levels of aggregation.
+3.  **`stats_agg`**: An aggregate summary of `stats` objects, identified by `type: "stats_agg"`. It is designed to be efficiently combined with other summaries.
     ```json
     {
+        "type": "stats_agg",
         "num_employees": {
-            "type": "integer_summary",
+            "coefficient_of_variation_pct": 154.16,
             "count": 3,
-            "sum": 2700,
-            "min": 50,
             "max": 2500,
             "mean": 900.00,
+            "min": 50,
+            "stddev": 1387.44,
+            "sum": 2700,
             "sum_sq_diff": 3845000.00,
-            "variance": 1922500.00,
-            "stddev": 1386.54,
-            "coefficient_of_variation_pct": 154.06
+            "type": "int_agg",
+            "variance": 1922500.00
         },
         "is_profitable": {
-            "type": "boolean_summary",
+            "type": "bool_agg",
             "counts": { "false": 1, "true": 2 }
         },
         "industry": {
-            "type": "text_summary",
+            "type": "str_agg",
             "counts": { "finance": 1, "tech": 2 }
         }
     }
@@ -81,12 +83,16 @@ CREATE TABLE stat_for_unit (
     legal_unit_id INT,
     code TEXT,
     value_int INT,
+    value_float FLOAT,
+    value_numeric NUMERIC(10,2),
     value_bool BOOLEAN,
     value_text TEXT,
     value_date DATE,
     stat JSONB GENERATED ALWAYS AS (
         CASE
             WHEN value_int IS NOT NULL THEN stat(value_int)
+            WHEN value_float IS NOT NULL THEN stat(value_float)
+            WHEN value_numeric IS NOT NULL THEN stat(value_numeric)
             WHEN value_bool IS NOT NULL THEN stat(value_bool)
             WHEN value_text IS NOT NULL THEN stat(value_text)
             WHEN value_date IS NOT NULL THEN stat(value_date)
@@ -94,6 +100,8 @@ CREATE TABLE stat_for_unit (
     ) STORED,
     CONSTRAINT one_value_must_be_set CHECK (
         (value_int IS NOT NULL)::int +
+        (value_float IS NOT NULL)::int +
+        (value_numeric IS NOT NULL)::int +
         (value_bool IS NOT NULL)::int +
         (value_text IS NOT NULL)::int +
         (value_date IS NOT NULL)::int = 1
@@ -102,16 +110,20 @@ CREATE TABLE stat_for_unit (
 
 
 -- Populate with data for the 2023 period
-INSERT INTO stat_for_unit (legal_unit_id, code, value_int, value_bool, value_text) VALUES
-(1, 'num_employees', 150, NULL, NULL),
-(1, 'is_profitable', NULL, true, NULL),
-(1, 'industry', NULL, NULL, 'tech'),
-(2, 'num_employees', 2500, NULL, NULL),
-(2, 'is_profitable', NULL, true, NULL),
-(2, 'industry', NULL, NULL, 'finance'),
-(3, 'num_employees', 50, NULL, NULL),
-(3, 'is_profitable', NULL, false, NULL),
-(3, 'industry', NULL, NULL, 'tech');
+INSERT INTO stat_for_unit (legal_unit_id, code, value_int) VALUES
+(1, 'num_employees', 150),
+(2, 'num_employees', 2500),
+(3, 'num_employees', 50);
+
+INSERT INTO stat_for_unit (legal_unit_id, code, value_bool) VALUES
+(1, 'is_profitable', true),
+(2, 'is_profitable', true),
+(3, 'is_profitable', false);
+
+INSERT INTO stat_for_unit (legal_unit_id, code, value_text) VALUES
+(1, 'industry', 'tech'),
+(2, 'industry', 'finance'),
+(3, 'industry', 'tech');
 ```
 
 ### 2. Aggregation Views
@@ -140,37 +152,68 @@ FROM
 WHERE lu.valid_from = '2023-01-01';
 ```
 
-#### `history_facet` (Level 2: `stats` -> `stats_summary`)
+#### `history_facet` (Level 2: `stats` -> `stats_agg`)
 
-This view uses `jsonb_stats_summary_agg(stats)` to create a statistical summary for each region, allowing for drill-down analysis.
+This view uses `jsonb_stats_agg(stats)` to create a statistical summary for each region, allowing for drill-down analysis.
 
 ```sql
--- This view would use the extension's jsonb_stats_summary_agg(stats) function.
+-- This view would use the extension's jsonb_stats_agg(stats) function.
 CREATE MATERIALIZED VIEW history_facet AS
 SELECT
     luh.valid_from,
     luh.valid_until,
     luh.region,
-    jsonb_stats_summary_agg(luh.stats) as stats_summary
+    jsonb_stats_agg(luh.stats) as stats_agg
 FROM legal_unit_history luh
 WHERE luh.valid_from = '2023-01-01'
 GROUP BY luh.valid_from, luh.valid_until, luh.region;
 
 -- Expected output for EU region:
 -- {
---   "num_employees": {
---     "type": "integer_summary", "count": 2, "sum": 200, "min": 50, "max": 150,
---     "mean": 100.00, "sum_sq_diff": 5000.00, "variance": 5000.00, "stddev": 70.71,
---     "coefficient_of_variation_pct": 70.71
---   },
---   "is_profitable": { "type": "boolean_summary", "counts": { "false": 1, "true": 1 } },
---   "industry":      { "type": "text_summary", "counts": { "tech": 2 } }
+--     "type": "stats_agg",
+--     "industry": {
+--         "type": "str_agg",
+--         "counts": {
+--             "tech": 2
+--         }
+--     },
+--     "turnover": {
+--         "max": 123456.78,
+--         "min": 123456.78,
+--         "sum": 123456.78,
+--         "mean": 123456.78,
+--         "type": "float_agg",
+--         "count": 1,
+--         "stddev": null,
+--         "variance": null,
+--         "sum_sq_diff": 0.00,
+--         "coefficient_of_variation_pct": null
+--     },
+--     "is_profitable": {
+--         "type": "bool_agg",
+--         "counts": {
+--             "true": 1,
+--             "false": 1
+--         }
+--     },
+--     "num_employees": {
+--         "max": 150,
+--         "min": 50,
+--         "sum": 200,
+--         "mean": 100.00,
+--         "type": "int_agg",
+--         "count": 2,
+--         "stddev": 70.71,
+--         "variance": 5000.00,
+--         "sum_sq_diff": 5000.00,
+--         "coefficient_of_variation_pct": 70.71
+--     }
 -- }
 ```
 
-#### `history` (Level 3: `stats_summary` -> `stats_summary`)
+#### `history` (Level 3: `stats_agg` -> `stats_agg`)
 
-This final view creates a global summary. It can be generated either from the `stats` objects directly or, more efficiently, by combining the regional `stats_summary` objects using `jsonb_stats_summary_merge_agg(stats_summary)`.
+This final view creates a global summary. It can be generated either from the `stats` objects directly or, more efficiently, by combining the regional `stats_agg` objects using `jsonb_stats_merge_agg(stats_agg)`.
 
 ```sql
 -- This view demonstrates combining faceted summaries into a global summary.
@@ -178,19 +221,25 @@ CREATE MATERIALIZED VIEW history AS
 SELECT
     hf.valid_from,
     hf.valid_until,
-    jsonb_stats_summary_merge_agg(hf.stats_summary) as stats_summary
+    jsonb_stats_merge_agg(hf.stats_agg) as stats_agg
 FROM history_facet hf
 GROUP BY hf.valid_from, hf.valid_until;
 
--- The resulting global stats_summary is shown in the Core Concepts section.
+-- The resulting global stats_agg is shown in the Core Concepts section.
 ```
 
 ### Structures in Detail
 
-The `stats_summary` object contains different summary structures depending on the data type being aggregated. The logic for these summaries is documented in `dev/reference_plpgsql.sql`.
+The `stats_agg` object contains different summary structures depending on the data type being aggregated. The logic for these summaries is documented in `dev/reference_plpgsql.sql`.
 
-#### `integer_summary`
-Aggregates numeric values. The calculation methods are chosen specifically to support efficient, online aggregation and merging of summaries.
+#### Numeric Summaries (`int_agg`, `float_agg`, `dec2_agg`)
+Aggregates numeric values, providing a trade-off between performance and precision. All calculated fields are stored as JSON `number`s.
+
+-   **`int_agg`**: For `bigint` values. Uses fast `int64` arithmetic.
+-   **`float_agg`**: For `float8` values. Uses fast `double` arithmetic.
+-   **`dec2_agg`**: For values with two decimal places. Uses fast, scaled `int64` arithmetic internally to guarantee precision while representing values as standard JSON `number`s in the output.
+
+All numeric summaries share the following fields:
 - `count`: Number of values.
 - `sum`: The sum of all values.
 - `min`/`max`: The minimum and maximum values.
@@ -206,11 +255,11 @@ Given three `stats` objects:
 `{"reading": stat(5)}`
 `{"reading": stat(20)}`
 
-The resulting `integer_summary` would be:
+The resulting `int_agg` would be:
 ```json
 {
     "reading": {
-        "type": "integer_summary",
+        "type": "int_agg",
         "count": 3,
         "sum": 35,
         "min": 5,
@@ -224,21 +273,21 @@ The resulting `integer_summary` would be:
 }
 ```
 
-#### `text_summary` / `boolean_summary`
+#### Categorical Summaries (`str_agg`, `bool_agg`)
 Aggregates string or boolean values.
 - `counts`: A JSONB object where keys are the distinct values and values are their frequencies.
 
-**Example (`text_summary`):**
+**Example (`str_agg`):**
 Given three `stats` objects:
 `{"category": stat('apple'::text)}`
 `{"category": stat('banana'::text)}`
 `{"category": stat('apple'::text)}`
 
-The resulting `text_summary` would be:
+The resulting `str_agg` would be:
 ```json
 {
     "category": {
-        "type": "text_summary",
+        "type": "str_agg",
         "counts": {
             "apple": 2,
             "banana": 1
@@ -247,17 +296,17 @@ The resulting `text_summary` would be:
 }
 ```
 
-**Example (`boolean_summary`):**
+**Example (`bool_agg`):**
 Given three `stats` objects:
 `{"is_active": stat(true)}`
 `{"is_active": stat(false)}`
 `{"is_active": stat(true)}`
 
-The resulting `boolean_summary` would be:
+The resulting `bool_agg` would be:
 ```json
 {
     "is_active": {
-        "type": "boolean_summary",
+        "type": "bool_agg",
         "counts": {
             "false": 1,
             "true": 2
@@ -266,10 +315,9 @@ The resulting `boolean_summary` would be:
 }
 ```
 
-#### `array_summary`
+#### Array Summary (`arr_agg`)
 Aggregates array values.
-- `count`: The number of arrays that have been processed. For example, aggregating two separate arrays results in `count: 2`.
-- `elements_count`: The sum of the number of elements from all processed arrays.
+- `count`: The number of arrays that have been processed. For example, aggregating two separate arrays results in `count: 2`. This is consistent with `count` for numeric summaries.
 - `counts`: A JSONB object tracking the frequency of each unique element across all arrays.
 
 **Example:**
@@ -278,13 +326,12 @@ Given three `stats` objects:
 `{"tags": stat(ARRAY[2, 3])}`
 `{"tags": stat(ARRAY[3, 4])}`
 
-The resulting `array_summary` would be:
+The resulting `arr_agg` would be:
 ```json
 {
     "tags": {
-        "type": "array_summary",
+        "type": "arr_agg",
         "count": 3,
-        "elements_count": 6,
         "counts": {
             "1": 1,
             "2": 2,
@@ -295,16 +342,23 @@ The resulting `array_summary` would be:
 }
 ```
 
+## Design Philosophy
+
+A key design feature of `jsonb_stats` is its use of a `stat` object (`{"type": "int", "value": 10}`). This structure is used to explicitly preserve the original SQL data type of a value (`bigint`, `float8`, `numeric(x,2)`, etc.) before it is aggregated.
+
+While this adds a level of nesting compared to working with raw `jsonb` values, it is a deliberate choice to enable performance and correctness. By capturing the intended type in a `stat` object, `jsonb_stats` can use the most performant internal representation (e.g., `int64` for `int`, scaled integers for `decimal2`) to perform fast and accurate calculations. This avoids the performance overhead and precision issues associated with PostgreSQL's generic `numeric` type inside a high-volume aggregation loop.
+
 ## API
 
 The extension provides the following core functions and aggregates:
 
-*   **Constructor Function**:
+*   **Constructor Functions**:
     *   `stat(anyelement)`: Creates a `stat` JSONB object from any scalar value.
+    *   `stats(code text, value anyelement)`: A helper to create a `stats` object with a single key-value pair.
 *   **Aggregate Functions**:
     *   `jsonb_stats_agg(code text, stat jsonb)`: Aggregates `(code, stat)` pairs into a single `stats` object.
-    *   `jsonb_stats_summary_agg(stats jsonb)`: Aggregates `stats` objects into a `stats_summary` object.
-    *   `jsonb_stats_summary_merge_agg(stats_summary jsonb)`: Merges multiple `stats_summary` objects into a single, higher-level summary.
+    *   `jsonb_stats_agg(stats jsonb)`: Aggregates `stats` objects (which contain `stat` values) into a `stats_agg` object.
+    *   `jsonb_stats_merge_agg(stats_agg jsonb)`: Merges multiple `stats_agg` objects into a single, higher-level summary.
 
 ## Installation
 
