@@ -75,7 +75,6 @@ INSERT INTO stat_for_unit (legal_unit_id, code, value_date) VALUES
 (1, 'start_date', '2010-01-01'),
 (3, 'start_date', '2015-06-15');
 
--- Test cases
 -- Show results suitable for jsonb_pretty for easy diffing.
 \t
 \a
@@ -83,6 +82,8 @@ INSERT INTO stat_for_unit (legal_unit_id, code, value_date) VALUES
 
 -- Test Level 1: stat -> stats
 -- Create `stats` for each legal unit.
+SELECT '--> Expected for legal_unit_id=1:' as " ";
+SELECT jsonb_pretty('{"type": "stats", "industry": {"type": "str", "value": "tech"}, "is_profitable": {"type": "bool", "value": true}, "num_employees": {"type": "int", "value": 150}, "pct_foreign_workers": {"type": "dec2", "value": 25.50}, "start_date": {"type": "date", "value": "2010-01-01"}, "turnover": {"type": "float", "value": 123456.78}}');
 WITH legal_unit_history AS (
     SELECT
         lu.legal_unit_id,
@@ -102,6 +103,8 @@ ORDER BY legal_unit_id;
 
 -- Test Level 2: stats -> stats_agg
 -- Create `stats_agg` for each region.
+SELECT '--> Expected for EU:' as " ";
+SELECT jsonb_pretty('{"type": "stats_agg", "industry": {"type": "str_agg", "counts": {"tech": 2}}, "is_profitable": {"type": "bool_agg", "counts": {"false": 1, "true": 1}}, "num_employees": {"coefficient_of_variation_pct": 70.71, "count": 2, "max": 150, "mean": 100.00, "min": 50, "stddev": 70.71, "sum": 200, "sum_sq_diff": 5000.00, "type": "int_agg", "variance": 5000.00}}');
 WITH legal_unit_history AS (
     SELECT
         lu.legal_unit_id,
@@ -129,6 +132,8 @@ ORDER BY region;
 
 -- Test Level 3: stats_agg -> stats_agg
 -- Combine regional summaries into a global summary.
+SELECT '--> Expected global:' as " ";
+SELECT jsonb_pretty('{"type": "stats_agg", "num_employees": {"coefficient_of_variation_pct": 154.16, "count": 3, "max": 2500, "mean": 900.00, "min": 50, "stddev": 1387.44, "sum": 2700, "sum_sq_diff": 3845000.00, "type": "int_agg", "variance": 1925000.00}}');
 WITH legal_unit_history AS (
     SELECT
         lu.legal_unit_id,

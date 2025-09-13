@@ -113,18 +113,24 @@ GROUP BY hf.valid_from, hf.valid_until;
 
 -- Test Level 1: stat -> stats from legal_unit_history
 SELECT '## Level 1: legal_unit_history' as test_description;
+SELECT '--> Expected for legal_unit_id=1:' as " ";
+SELECT jsonb_pretty('{"type": "stats", "industry": {"type": "str", "value": "tech"}, "is_profitable": {"type": "bool", "value": true}, "num_employees": {"type": "int", "value": 150}, "turnover": {"type": "float", "value": 123456.78}}');
 SELECT legal_unit_id, jsonb_pretty(stats) as stats
 FROM legal_unit_history
 ORDER BY legal_unit_id;
 
 -- Test Level 2: stats -> stats_agg from history_facet
 SELECT '## Level 2: history_facet' as test_description;
+SELECT '--> Expected for EU:' as " ";
+SELECT jsonb_pretty('{"type": "stats_agg", "industry": {"type": "str_agg", "counts": {"tech": 2}}, "is_profitable": {"type": "bool_agg", "counts": {"false": 1, "true": 1}}, "num_employees": {"coefficient_of_variation_pct": 70.71, "count": 2, "max": 150, "mean": 100.00, "min": 50, "stddev": 70.71, "sum": 200, "sum_sq_diff": 5000.00, "type": "int_agg", "variance": 5000.00}}');
 SELECT region, jsonb_pretty(stats_agg) as stats_agg
 FROM history_facet
 ORDER BY region;
 
 -- Test Level 3: stats_agg -> stats_agg from history
 SELECT '## Level 3: history' as test_description;
+SELECT '--> Expected global:' as " ";
+SELECT jsonb_pretty('{"type": "stats_agg", "industry": {"type": "str_agg", "counts": {"finance": 1, "tech": 2}}, "is_profitable": {"type": "bool_agg", "counts": {"false": 1, "true": 2}}, "num_employees": {"coefficient_of_variation_pct": 154.16, "count": 3, "max": 2500, "mean": 900.00, "min": 50, "stddev": 1387.44, "sum": 2700, "sum_sq_diff": 3845000.00, "type": "int_agg", "variance": 1922500.00}}');
 SELECT jsonb_pretty(stats_agg) as stats_agg
 FROM history;
 
