@@ -197,16 +197,16 @@ GROUP BY luh.valid_from, luh.valid_until, luh.region;
 --         }
 --     },
 --     "num_employees": {
---         "max": 150,
---         "min": 50,
---         "sum": 200,
---         "mean": 100.00,
---         "type": "int_agg",
+--         "coefficient_of_variation_pct": 70.71,
 --         "count": 2,
+--         "max": 150,
+--         "mean": 100.00,
+--         "min": 50,
 --         "stddev": 70.71,
---         "variance": 5000.00,
+--         "sum": 200,
 --         "sum_sq_diff": 5000.00,
---         "coefficient_of_variation_pct": 70.71
+--         "type": "int_agg",
+--         "variance": 5000.00
 --     }
 -- }
 ```
