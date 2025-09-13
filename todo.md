@@ -6,9 +6,30 @@ Keep a journal.md that tracks the state of the current ongoing task and relevant
 
 This file tracks the major development tasks for the `jsonb_stats` extension.
 
-## Completed
+## High Priority
+- [ ] Spike: Evaluate `pgzx` (Zig) as an alternative to the C implementation.
+    - [ ] Set up a new `pgzx` project based on their template.
+    - [ ] Port a single function (e.g., `stat(anyelement)`) to Zig as a proof-of-concept.
+    - [ ] Assess the development experience and feasibility of porting the entire extension.
 
--   [x] Standardize `stats_summary` structure and function names.
+<details>
+<summary>On Hold: C Implementation</summary>
+
+- [ ] Fix all C-level bugs and restore full functionality by incrementally rebuilding the aggregate functions.
+    - [x] Stabilize C code by stubbing aggregate functions.
+    - [ ] Re-implement `jsonb_stats_accum` (initialization path).
+    - [ ] Re-implement `jsonb_stats_accum` (update path for all summary types).
+    - [ ] Re-implement `jsonb_stats_merge`.
+    - [ ] Re-implement `jsonb_stats_final` (calculation of derived statistics).
+    - [ ] Update all tests to match new API and verify correctness.
+- [ ] Finalize documentation and clean up test files.
+
+</details>
+
+<details>
+<summary>Completed Tasks</summary>
+
+## Completed
 -   [x] Define API and create SQL stubs (`jsonb_stats--1.0.sql`).
 -   [x] Port PL/pgSQL implementation into the extension.
 -   [x] Create regression test for PL/pgSQL API (`sql/002_jsonb_stats_api_plpgsql.sql`).
