@@ -372,6 +372,16 @@ Then, connect to your PostgreSQL database and enable the extension:
 CREATE EXTENSION jsonb_stats;
 ```
 
+### Git Hooks and Scratch Directories
+
+This project uses a scratch directory (`tmp/`) for local experiments and AI tool interaction. Files in this directory can be locally staged to view changes with `git diff`, but a pre-commit hook will prevent them from ever being committed.
+
+**One-Time Setup:** To enable this and other project conventions, all developers must configure Git to use our shared hooks path after cloning:
+
+```bash
+git config core.hooksPath devops/githooks
+```
+
 ## Development
 
 This extension is developed as a standard PostgreSQL C extension. To run the full regression test suite:
