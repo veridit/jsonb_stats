@@ -5,7 +5,7 @@ use pgrx::{Internal, JsonB};
 use serde_json::{json, Map, Number, Value};
 
 use crate::helpers::*;
-use crate::state::{AggEntry, StatsState};
+use crate::state::{AggEntry, NumFields, StatsState};
 
 /// Accumulate a single stats object into the running state (stats -> stats_agg).
 ///
@@ -58,17 +58,26 @@ pub fn jsonb_stats_accum(state: JsonB, stats: JsonB) -> JsonB {
 /// Initialize a new aggregate summary from a single stat value.
 fn init_summary(stat: &Map<String, Value>, stat_type: &str) -> Value {
     match stat_type {
-        "int" => init_int_agg(stat),
+        "int" | "float" | "dec2" => init_num_agg(stat, stat_type),
+        "nat" => {
+            let val = get_f64(stat, "value");
+            if val < 0.0 {
+                return Value::Null;
+            }
+            init_num_agg(stat, "nat")
+        }
         "str" | "bool" => init_str_or_bool_agg(stat, stat_type),
         "arr" => init_arr_agg(stat),
+        "date" => init_date_agg(stat),
         _ => Value::Object(stat.clone()),
     }
 }
 
-fn init_int_agg(stat: &Map<String, Value>) -> Value {
+fn init_num_agg(stat: &Map<String, Value>, stat_type: &str) -> Value {
     let val = get_f64(stat, "value");
+    let agg_type = format!("{}_agg", stat_type);
     let mut result = Map::new();
-    result.insert("type".to_string(), json!("int_agg"));
+    result.insert("type".to_string(), json!(agg_type));
     result.insert("count".to_string(), Value::Number(Number::from(1)));
     result.insert("sum".to_string(), num_value(val));
     result.insert("min".to_string(), num_value(val));
@@ -142,6 +151,23 @@ fn init_arr_agg(stat: &Map<String, Value>) -> Value {
     Value::Object(result)
 }
 
+fn init_date_agg(stat: &Map<String, Value>) -> Value {
+    let date_str = match stat.get("value") {
+        Some(Value::String(s)) => s.clone(),
+        _ => return Value::Null,
+    };
+
+    let mut counts = Map::new();
+    counts.insert(date_str.clone(), Value::Number(Number::from(1)));
+
+    let mut result = Map::new();
+    result.insert("type".to_string(), json!("date_agg"));
+    result.insert("counts".to_string(), Value::Object(counts));
+    result.insert("min".to_string(), json!(date_str));
+    result.insert("max".to_string(), json!(date_str));
+    Value::Object(result)
+}
+
 /// Update an existing aggregate summary with a new stat value.
 fn update_summary(current: Value, stat: &Map<String, Value>, stat_type: &str) -> Value {
     let current_obj = match current {
@@ -150,15 +176,23 @@ fn update_summary(current: Value, stat: &Map<String, Value>, stat_type: &str) ->
     };
 
     match stat_type {
-        "int" => update_int_agg(current_obj, stat),
+        "int" | "float" | "dec2" => update_num_agg(current_obj, stat),
+        "nat" => {
+            let val = get_f64(stat, "value");
+            if val < 0.0 {
+                return Value::Object(current_obj);
+            }
+            update_num_agg(current_obj, stat)
+        }
         "str" | "bool" => update_str_or_bool_agg(current_obj, stat),
         "arr" => update_arr_agg(current_obj, stat),
+        "date" => update_date_agg(current_obj, stat),
         _ => Value::Object(current_obj),
     }
 }
 
-/// Welford single-value update for int_agg.
-fn update_int_agg(mut obj: Map<String, Value>, stat: &Map<String, Value>) -> Value {
+/// Welford single-value update for any numeric agg type.
+fn update_num_agg(mut obj: Map<String, Value>, stat: &Map<String, Value>) -> Value {
     let val = get_f64(stat, "value");
     let count = get_f64(&obj, "count") + 1.0;
     let old_mean = get_f64(&obj, "mean");
@@ -166,7 +200,7 @@ fn update_int_agg(mut obj: Map<String, Value>, stat: &Map<String, Value>) -> Val
     let new_mean = old_mean + delta / count;
     let new_ssd = get_f64(&obj, "sum_sq_diff") + delta * (val - new_mean);
 
-    obj.insert("type".to_string(), json!("int_agg"));
+    // Preserve the existing type tag
     obj.insert("count".to_string(), num_value(count));
     obj.insert(
         "sum".to_string(),
@@ -269,6 +303,47 @@ fn update_arr_agg(mut obj: Map<String, Value>, stat: &Map<String, Value>) -> Val
     Value::Object(obj)
 }
 
+/// Update date_agg: increment count for date string, update min/max.
+fn update_date_agg(mut obj: Map<String, Value>, stat: &Map<String, Value>) -> Value {
+    let date_str = match stat.get("value") {
+        Some(Value::String(s)) => s.clone(),
+        _ => return Value::Object(obj),
+    };
+
+    // Update counts
+    let mut counts: Map<String, Value> = obj
+        .remove("counts")
+        .and_then(|v| match v {
+            Value::Object(m) => Some(m),
+            _ => None,
+        })
+        .unwrap_or_default();
+
+    let current: i64 = counts
+        .get(&date_str)
+        .and_then(|v| match v {
+            Value::Number(n) => n.to_string().parse().ok(),
+            _ => None,
+        })
+        .unwrap_or(0);
+    counts.insert(date_str.clone(), Value::Number(Number::from(current + 1)));
+    obj.insert("counts".to_string(), Value::Object(counts));
+
+    // Update min/max via string compare (ISO dates sort lexicographically)
+    if let Some(Value::String(cur_min)) = obj.get("min") {
+        if date_str < *cur_min {
+            obj.insert("min".to_string(), json!(date_str));
+        }
+    }
+    if let Some(Value::String(cur_max)) = obj.get("max") {
+        if date_str > *cur_max {
+            obj.insert("max".to_string(), json!(date_str));
+        }
+    }
+
+    Value::Object(obj)
+}
+
 // ── Internal-state sfunc for the aggregate (avoids serde_json round-trip per row) ──
 
 /// Aggregate sfunc using pgrx Internal state. The state is a native Rust
@@ -324,14 +399,22 @@ fn init_entry(stat: &Map<String, Value>, stat_type: &str) -> Option<AggEntry> {
     match stat_type {
         "int" => {
             let val = get_f64(stat, "value");
-            Some(AggEntry::IntAgg {
-                count: 1,
-                sum: val,
-                min: val,
-                max: val,
-                mean: val,
-                sum_sq_diff: 0.0,
-            })
+            Some(AggEntry::IntAgg(NumFields::init(val)))
+        }
+        "float" => {
+            let val = get_f64(stat, "value");
+            Some(AggEntry::FloatAgg(NumFields::init(val)))
+        }
+        "dec2" => {
+            let val = get_f64(stat, "value");
+            Some(AggEntry::Dec2Agg(NumFields::init(val)))
+        }
+        "nat" => {
+            let val = get_f64(stat, "value");
+            if val < 0.0 {
+                return None;
+            }
+            Some(AggEntry::NatAgg(NumFields::init(val)))
         }
         "str" => {
             let val_str = value_to_string(stat)?;
@@ -350,31 +433,33 @@ fn init_entry(stat: &Map<String, Value>, stat_type: &str) -> Option<AggEntry> {
             collect_arr_counts(stat, &mut counts);
             Some(AggEntry::ArrAgg { count: 1, counts })
         }
+        "date" => {
+            let date_str = match stat.get("value") {
+                Some(Value::String(s)) => s.clone(),
+                _ => return None,
+            };
+            let mut counts = HashMap::new();
+            counts.insert(date_str.clone(), 1);
+            Some(AggEntry::DateAgg {
+                counts,
+                min_date: Some(date_str.clone()),
+                max_date: Some(date_str),
+            })
+        }
         _ => None,
     }
 }
 
 fn update_entry(entry: &mut AggEntry, stat: &Map<String, Value>, _stat_type: &str) {
     match entry {
-        AggEntry::IntAgg {
-            count,
-            sum,
-            min,
-            max,
-            mean,
-            sum_sq_diff,
-        } => {
+        AggEntry::IntAgg(f) | AggEntry::FloatAgg(f) | AggEntry::Dec2Agg(f) => {
             let val = get_f64(stat, "value");
-            *count += 1;
-            let delta = val - *mean;
-            *mean += delta / (*count as f64);
-            *sum_sq_diff += delta * (val - *mean);
-            *sum += val;
-            if val < *min {
-                *min = val;
-            }
-            if val > *max {
-                *max = val;
+            f.update(val);
+        }
+        AggEntry::NatAgg(f) => {
+            let val = get_f64(stat, "value");
+            if val >= 0.0 {
+                f.update(val);
             }
         }
         AggEntry::StrAgg { counts } | AggEntry::BoolAgg { counts } => {
@@ -385,6 +470,25 @@ fn update_entry(entry: &mut AggEntry, stat: &Map<String, Value>, _stat_type: &st
         AggEntry::ArrAgg { count, counts } => {
             *count += 1;
             collect_arr_counts(stat, counts);
+        }
+        AggEntry::DateAgg {
+            counts,
+            min_date,
+            max_date,
+        } => {
+            if let Some(Value::String(date_str)) = stat.get("value") {
+                *counts.entry(date_str.clone()).or_insert(0) += 1;
+                match min_date {
+                    Some(cur) if date_str < cur => *min_date = Some(date_str.clone()),
+                    None => *min_date = Some(date_str.clone()),
+                    _ => {}
+                }
+                match max_date {
+                    Some(cur) if date_str > cur => *max_date = Some(date_str.clone()),
+                    None => *max_date = Some(date_str.clone()),
+                    _ => {}
+                }
+            }
         }
     }
 }

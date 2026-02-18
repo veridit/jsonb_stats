@@ -46,3 +46,11 @@ pub fn round2(v: f64) -> Value {
     // format!("{:.2}", v) always produces exactly 2 decimal places
     serde_json::from_str(&format!("{:.2}", v)).unwrap()
 }
+
+/// Extract a string from a JSON object by key.
+pub fn get_str<'a>(obj: &'a Map, key: &str) -> Option<&'a str> {
+    match obj.get(key) {
+        Some(Value::String(s)) => Some(s.as_str()),
+        _ => None,
+    }
+}

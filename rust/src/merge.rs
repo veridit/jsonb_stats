@@ -5,10 +5,10 @@ use pgrx::{Internal, JsonB};
 use serde_json::{json, Map, Number, Value};
 
 use crate::helpers::*;
-use crate::state::{AggEntry, StatsState};
+use crate::state::{AggEntry, NumFields, StatsState};
 
-/// Merge two stats_agg JSONB objects (Welford parallel merge for int_agg,
-/// count-map merging for str_agg/bool_agg/arr_agg).
+/// Merge two stats_agg JSONB objects (Welford parallel merge for numeric aggs,
+/// count-map merging for str_agg/bool_agg/arr_agg/date_agg).
 ///
 /// Spec: dev/reference_plpgsql.sql lines 95-141
 #[pg_extern(immutable, parallel_safe, strict)]
@@ -50,15 +50,17 @@ fn merge_summaries(a: Value, b: Value) -> Value {
     };
 
     match get_type(&a_obj) {
-        "int_agg" => merge_int_agg(a_obj, &b_obj),
+        "int_agg" | "float_agg" | "dec2_agg" | "nat_agg" => merge_num_agg(a_obj, &b_obj),
         "str_agg" | "bool_agg" => merge_count_agg(a_obj, &b_obj, false),
         "arr_agg" => merge_count_agg(a_obj, &b_obj, true),
+        "date_agg" => merge_date_agg(a_obj, &b_obj),
         _ => Value::Object(a_obj),
     }
 }
 
-/// Welford parallel merge for int_agg summaries.
-fn merge_int_agg(a: Map<String, Value>, b: &Map<String, Value>) -> Value {
+/// Welford parallel merge for any numeric agg summaries.
+/// Preserves the original type tag from a_obj.
+fn merge_num_agg(a: Map<String, Value>, b: &Map<String, Value>) -> Value {
     let count_a = get_f64(&a, "count");
     let count_b = get_f64(b, "count");
     let total_count = count_a + count_b;
@@ -75,8 +77,10 @@ fn merge_int_agg(a: Map<String, Value>, b: &Map<String, Value>) -> Value {
     let new_min = get_f64(&a, "min").min(get_f64(b, "min"));
     let new_max = get_f64(&a, "max").max(get_f64(b, "max"));
 
+    let type_tag = get_type(&a);
+
     let mut result = Map::new();
-    result.insert("type".to_string(), json!("int_agg"));
+    result.insert("type".to_string(), json!(type_tag));
     result.insert("count".to_string(), num_value(total_count));
     result.insert("sum".to_string(), num_value(new_sum));
     result.insert("min".to_string(), num_value(new_min));
@@ -132,6 +136,64 @@ fn merge_count_agg(
     Value::Object(a_obj)
 }
 
+/// Merge two date_agg objects: merge count maps + min/max dates.
+fn merge_date_agg(mut a_obj: Map<String, Value>, b_obj: &Map<String, Value>) -> Value {
+    // Merge counts
+    let mut counts_a: Map<String, Value> = a_obj
+        .remove("counts")
+        .and_then(|v| match v {
+            Value::Object(m) => Some(m),
+            _ => None,
+        })
+        .unwrap_or_default();
+
+    if let Some(Value::Object(counts_b)) = b_obj.get("counts") {
+        for (k, v) in counts_b {
+            let v_int: i64 = match v {
+                Value::Number(n) => n.to_string().parse().unwrap_or(0),
+                _ => 0,
+            };
+            let existing: i64 = counts_a
+                .get(k)
+                .and_then(|v| match v {
+                    Value::Number(n) => n.to_string().parse().ok(),
+                    _ => None,
+                })
+                .unwrap_or(0);
+            counts_a.insert(k.clone(), Value::Number(Number::from(existing + v_int)));
+        }
+    }
+    a_obj.insert("counts".to_string(), Value::Object(counts_a));
+
+    // Merge min (lexicographic — ISO dates sort correctly)
+    if let Some(b_min) = get_str(b_obj, "min") {
+        match get_str(&a_obj, "min") {
+            Some(a_min) if b_min < a_min => {
+                a_obj.insert("min".to_string(), json!(b_min));
+            }
+            None => {
+                a_obj.insert("min".to_string(), json!(b_min));
+            }
+            _ => {}
+        }
+    }
+
+    // Merge max
+    if let Some(b_max) = get_str(b_obj, "max") {
+        match get_str(&a_obj, "max") {
+            Some(a_max) if b_max > a_max => {
+                a_obj.insert("max".to_string(), json!(b_max));
+            }
+            None => {
+                a_obj.insert("max".to_string(), json!(b_max));
+            }
+            _ => {}
+        }
+    }
+
+    Value::Object(a_obj)
+}
+
 // ── Internal-state merge sfunc (avoids serde_json round-trip on growing state) ──
 
 /// Merge sfunc using pgrx Internal state. Each input stats_agg JSONB is
@@ -177,14 +239,10 @@ pub unsafe fn jsonb_stats_merge_sfunc(internal: Internal, agg: pgrx::JsonB) -> I
 /// Parse a JSONB *_agg object into a native AggEntry.
 fn parse_agg_entry(obj: &Map<String, Value>) -> Option<AggEntry> {
     match get_type(obj) {
-        "int_agg" => Some(AggEntry::IntAgg {
-            count: get_f64(obj, "count") as i64,
-            sum: get_f64(obj, "sum"),
-            min: get_f64(obj, "min"),
-            max: get_f64(obj, "max"),
-            mean: get_f64(obj, "mean"),
-            sum_sq_diff: get_f64(obj, "sum_sq_diff"),
-        }),
+        "int_agg" => Some(AggEntry::IntAgg(parse_num_fields(obj))),
+        "float_agg" => Some(AggEntry::FloatAgg(parse_num_fields(obj))),
+        "dec2_agg" => Some(AggEntry::Dec2Agg(parse_num_fields(obj))),
+        "nat_agg" => Some(AggEntry::NatAgg(parse_num_fields(obj))),
         "str_agg" => Some(AggEntry::StrAgg {
             counts: parse_counts(obj),
         }),
@@ -195,7 +253,23 @@ fn parse_agg_entry(obj: &Map<String, Value>) -> Option<AggEntry> {
             count: get_f64(obj, "count") as i64,
             counts: parse_counts(obj),
         }),
+        "date_agg" => Some(AggEntry::DateAgg {
+            counts: parse_counts(obj),
+            min_date: get_str(obj, "min").map(|s| s.to_string()),
+            max_date: get_str(obj, "max").map(|s| s.to_string()),
+        }),
         _ => None,
+    }
+}
+
+fn parse_num_fields(obj: &Map<String, Value>) -> NumFields {
+    NumFields {
+        count: get_f64(obj, "count") as i64,
+        sum: get_f64(obj, "sum"),
+        min: get_f64(obj, "min"),
+        max: get_f64(obj, "max"),
+        mean: get_f64(obj, "mean"),
+        sum_sq_diff: get_f64(obj, "sum_sq_diff"),
     }
 }
 
@@ -217,39 +291,12 @@ fn parse_counts(obj: &Map<String, Value>) -> HashMap<String, i64> {
 /// Welford parallel merge and count-map merge on native AggEntry types.
 fn merge_agg_entries(existing: &mut AggEntry, incoming: AggEntry) {
     match (existing, incoming) {
-        (
-            AggEntry::IntAgg {
-                count: count_a,
-                sum: sum_a,
-                min: min_a,
-                max: max_a,
-                mean: mean_a,
-                sum_sq_diff: ssd_a,
-            },
-            AggEntry::IntAgg {
-                count: count_b,
-                sum: sum_b,
-                min: min_b,
-                max: max_b,
-                mean: mean_b,
-                sum_sq_diff: ssd_b,
-            },
-        ) => {
-            let ca = *count_a as f64;
-            let cb = count_b as f64;
-            let total = ca + cb;
-            let delta = mean_b - *mean_a;
-
-            *mean_a += delta * cb / total;
-            *ssd_a += ssd_b + (delta * delta * ca * cb) / total;
-            *count_a += count_b;
-            *sum_a += sum_b;
-            if min_b < *min_a {
-                *min_a = min_b;
-            }
-            if max_b > *max_a {
-                *max_a = max_b;
-            }
+        // All numeric types: use NumFields::merge
+        (AggEntry::IntAgg(a), AggEntry::IntAgg(b))
+        | (AggEntry::FloatAgg(a), AggEntry::FloatAgg(b))
+        | (AggEntry::Dec2Agg(a), AggEntry::Dec2Agg(b))
+        | (AggEntry::NatAgg(a), AggEntry::NatAgg(b)) => {
+            a.merge(&b);
         }
         (AggEntry::StrAgg { counts: ca }, AggEntry::StrAgg { counts: cb })
         | (AggEntry::BoolAgg { counts: ca }, AggEntry::BoolAgg { counts: cb }) => {
@@ -270,6 +317,34 @@ fn merge_agg_entries(existing: &mut AggEntry, incoming: AggEntry) {
             *count_a += count_b;
             for (k, v) in cb {
                 *ca.entry(k).or_insert(0) += v;
+            }
+        }
+        (
+            AggEntry::DateAgg {
+                counts: ca,
+                min_date: min_a,
+                max_date: max_a,
+            },
+            AggEntry::DateAgg {
+                counts: cb,
+                min_date: min_b,
+                max_date: max_b,
+            },
+        ) => {
+            for (k, v) in cb {
+                *ca.entry(k).or_insert(0) += v;
+            }
+            // Merge min
+            match (&*min_a, &min_b) {
+                (Some(a), Some(b)) if b < a => *min_a = Some(b.clone()),
+                (None, Some(_)) => *min_a = min_b,
+                _ => {}
+            }
+            // Merge max
+            match (&*max_a, &max_b) {
+                (Some(a), Some(b)) if b > a => *max_a = Some(b.clone()),
+                (None, Some(_)) => *max_a = max_b,
+                _ => {}
             }
         }
         _ => {} // type mismatch — skip

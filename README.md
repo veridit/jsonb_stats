@@ -8,7 +8,7 @@ The extension is built on two core principles that enable powerful, hierarchical
 
 1.  **Mergeable Summaries**: The statistical summaries (`stats_agg`) are designed to be efficiently combined. This is achieved by using online algorithms for calculating metrics like mean and variance (e.g., Welford's method). This feature is critical for building multi-level reports, such as aggregating daily data into monthly summaries, or regional data into a global summary, without reprocessing the raw data. This allows for the creation of faceted histories (`history_facet`) that can be drilled down into or rolled up.
 
-2.  **Normalized Change Detection**: The `int_agg` summary includes the `coefficient_of_variation_pct`. This metric provides a standardized, unit-less measure of variability relative to the mean. It allows data analysts to quickly identify significant changes or volatility in a statistic, regardless of the actual scale of the underlying numbers, making it easier to pinpoint areas of interest in large datasets.
+2.  **Normalized Change Detection**: All numeric summaries (`int_agg`, `float_agg`, `dec2_agg`, `nat_agg`) include the `coefficient_of_variation_pct`. This metric provides a standardized, unit-less measure of variability relative to the mean. It allows data analysts to quickly identify significant changes or volatility in a statistic, regardless of the actual scale of the underlying numbers, making it easier to pinpoint areas of interest in large datasets.
 
 ## Core Concepts
 
@@ -232,12 +232,13 @@ GROUP BY hf.valid_from, hf.valid_until;
 
 The `stats_agg` object contains different summary structures depending on the data type being aggregated. The logic for these summaries is documented in `dev/reference_plpgsql.sql`.
 
-#### Numeric Summaries (`int_agg`, `float_agg`, `dec2_agg`)
+#### Numeric Summaries (`int_agg`, `float_agg`, `dec2_agg`, `nat_agg`)
 Aggregates numeric values, providing a trade-off between performance and precision. All calculated fields are stored as JSON `number`s.
 
 -   **`int_agg`**: For `bigint` values. Uses fast `int64` arithmetic.
 -   **`float_agg`**: For `float8` values. Uses fast `double` arithmetic.
 -   **`dec2_agg`**: For values with two decimal places. Uses fast, scaled `int64` arithmetic internally to guarantee precision while representing values as standard JSON `number`s in the output.
+-   **`nat_agg`**: For natural numbers (non-negative integers). Same Welford accumulation as `int_agg`, but validates that values are >= 0. Negative values are silently skipped. Created manually via `jsonb_build_object('type','nat','value',42)` (no PG OID maps to it automatically).
 
 All numeric summaries share the following fields:
 - `count`: Number of values.
@@ -315,6 +316,33 @@ The resulting `bool_agg` would be:
 }
 ```
 
+#### Date Summary (`date_agg`)
+Aggregates date values with a hybrid approach: a count map (like `str_agg`) plus min/max date tracking.
+- `counts`: A JSONB object where keys are ISO date strings and values are their frequencies.
+- `min`: The earliest date observed (ISO format string comparison is correct for dates).
+- `max`: The latest date observed.
+
+**Example:**
+Given three `stats` objects:
+`{"founded": stat('2024-01-15'::date)}`
+`{"founded": stat('2023-06-01'::date)}`
+`{"founded": stat('2024-01-15'::date)}`
+
+The resulting `date_agg` would be:
+```json
+{
+    "founded": {
+        "type": "date_agg",
+        "counts": {
+            "2023-06-01": 1,
+            "2024-01-15": 2
+        },
+        "min": "2023-06-01",
+        "max": "2024-01-15"
+    }
+}
+```
+
 #### Array Summary (`arr_agg`)
 Aggregates array values.
 - `count`: The number of arrays that have been processed. For example, aggregating two separate arrays results in `count: 2`. This is consistent with `count` for numeric summaries.
@@ -362,9 +390,11 @@ The extension provides the following core functions and aggregates:
 
 ## Installation
 
-To build and install the extension from source, run:
+The extension is built with [pgrx](https://github.com/pgcentralfoundation/pgrx) (Rust).
+
 ```sh
-make install
+cd rust
+cargo pgrx install    # Install into system PostgreSQL
 ```
 
 Then, connect to your PostgreSQL database and enable the extension:
@@ -384,8 +414,10 @@ git config core.hooksPath devops/githooks
 
 ## Development
 
-This extension is developed as a standard PostgreSQL C extension. To run the full regression test suite:
+The extension is implemented in Rust via [pgrx](https://github.com/pgcentralfoundation/pgrx). To run the test suite:
 
 ```sh
-make install && make test
+cd rust
+cargo pgrx test       # Run all tests (including benchmarks)
+cargo pgrx run        # Launch psql with extension loaded
 ```

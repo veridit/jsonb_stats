@@ -3,9 +3,9 @@ use pgrx::{Internal, JsonB};
 use serde_json::{json, Map, Number, Value};
 
 use crate::helpers::*;
-use crate::state::{AggEntry, StatsState};
+use crate::state::{AggEntry, NumFields, StatsState};
 
-/// Compute derived statistics (variance, stddev, cv_pct) for int_agg summaries,
+/// Compute derived statistics (variance, stddev, cv_pct) for numeric agg summaries,
 /// add "type": "stats_agg" to the result, and round numeric fields to 2 decimal places.
 ///
 /// Spec: dev/reference_plpgsql.sql lines 145-176
@@ -25,7 +25,14 @@ pub fn jsonb_stats_final(state: JsonB) -> JsonB {
         }
 
         let finalized = match summary {
-            Value::Object(obj) if get_type(&obj) == "int_agg" => finalize_int_agg(obj),
+            Value::Object(obj)
+                if matches!(
+                    get_type(&obj),
+                    "int_agg" | "float_agg" | "dec2_agg" | "nat_agg"
+                ) =>
+            {
+                finalize_num_agg(obj)
+            }
             other => other,
         };
 
@@ -35,8 +42,9 @@ pub fn jsonb_stats_final(state: JsonB) -> JsonB {
     JsonB(Value::Object(result))
 }
 
-/// Add derived stats to an int_agg summary and round numeric fields.
-fn finalize_int_agg(mut obj: Map<String, Value>) -> Value {
+/// Add derived stats to a numeric agg summary and round numeric fields.
+/// Preserves the original type tag.
+fn finalize_num_agg(mut obj: Map<String, Value>) -> Value {
     let count = get_f64(&obj, "count");
     let mean = get_f64(&obj, "mean");
     let ssd = get_f64(&obj, "sum_sq_diff");
@@ -101,14 +109,10 @@ pub unsafe fn jsonb_stats_final_internal(internal: Internal) -> JsonB {
 
     for (key, entry) in &state.entries {
         let val = match entry {
-            AggEntry::IntAgg {
-                count,
-                sum,
-                min,
-                max,
-                mean,
-                sum_sq_diff,
-            } => finalize_int_entry(*count, *sum, *min, *max, *mean, *sum_sq_diff),
+            AggEntry::IntAgg(f)
+            | AggEntry::FloatAgg(f)
+            | AggEntry::Dec2Agg(f)
+            | AggEntry::NatAgg(f) => finalize_num_entry(entry.type_tag(), f),
             AggEntry::StrAgg { counts } => {
                 let mut m = Map::new();
                 m.insert("type".to_string(), json!("str_agg"));
@@ -140,6 +144,26 @@ pub unsafe fn jsonb_stats_final_internal(internal: Internal) -> JsonB {
                 m.insert("counts".to_string(), Value::Object(c));
                 Value::Object(m)
             }
+            AggEntry::DateAgg {
+                counts,
+                min_date,
+                max_date,
+            } => {
+                let mut m = Map::new();
+                m.insert("type".to_string(), json!("date_agg"));
+                let mut c = Map::new();
+                for (k, v) in counts {
+                    c.insert(k.clone(), Value::Number(Number::from(*v)));
+                }
+                m.insert("counts".to_string(), Value::Object(c));
+                if let Some(min) = min_date {
+                    m.insert("min".to_string(), json!(min));
+                }
+                if let Some(max) = max_date {
+                    m.insert("max".to_string(), json!(max));
+                }
+                Value::Object(m)
+            }
         };
         result.insert(key.clone(), val);
     }
@@ -147,21 +171,21 @@ pub unsafe fn jsonb_stats_final_internal(internal: Internal) -> JsonB {
     JsonB(Value::Object(result))
 }
 
-fn finalize_int_entry(count: i64, sum: f64, min: f64, max: f64, mean: f64, ssd: f64) -> Value {
+fn finalize_num_entry(type_tag: &str, f: &NumFields) -> Value {
     let mut obj = Map::new();
-    obj.insert("type".to_string(), json!("int_agg"));
-    obj.insert("count".to_string(), Value::Number(Number::from(count)));
-    obj.insert("sum".to_string(), num_value(sum));
-    obj.insert("min".to_string(), num_value(min));
-    obj.insert("max".to_string(), num_value(max));
-    obj.insert("mean".to_string(), round2(mean));
-    obj.insert("sum_sq_diff".to_string(), round2(ssd));
+    obj.insert("type".to_string(), json!(type_tag));
+    obj.insert("count".to_string(), Value::Number(Number::from(f.count)));
+    obj.insert("sum".to_string(), num_value(f.sum));
+    obj.insert("min".to_string(), num_value(f.min));
+    obj.insert("max".to_string(), num_value(f.max));
+    obj.insert("mean".to_string(), round2(f.mean));
+    obj.insert("sum_sq_diff".to_string(), round2(f.sum_sq_diff));
 
-    if count > 1 {
-        let var = ssd / (count as f64 - 1.0);
+    if f.count > 1 {
+        let var = f.sum_sq_diff / (f.count as f64 - 1.0);
         let sd = if var >= 0.0 { var.sqrt() } else { f64::NAN };
-        let cv = if mean != 0.0 {
-            (sd / mean) * 100.0
+        let cv = if f.mean != 0.0 {
+            (sd / f.mean) * 100.0
         } else {
             f64::NAN
         };

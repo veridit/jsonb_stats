@@ -421,6 +421,214 @@ mod tests {
         assert_eq!(ok, Ok(Some(true)));
     }
 
+    // ── float type tests ──
+
+    #[pg_test]
+    fn test_accum_init_float() {
+        let result = Spi::get_one::<pgrx::JsonB>(
+            "SELECT jsonb_stats_accum(
+                '{}'::jsonb,
+                '{\"price\": {\"type\": \"float\", \"value\": 3.14}}'::jsonb
+            )",
+        );
+        let val = result.unwrap().unwrap().0;
+        let price = &val["price"];
+        assert_eq!(price["type"], "float_agg");
+        assert_eq!(price["count"], 1);
+    }
+
+    #[pg_test]
+    fn test_merge_float_agg() {
+        let result = Spi::get_one::<pgrx::JsonB>(
+            "SELECT jsonb_stats_merge(
+                '{\"price\": {\"type\": \"float_agg\", \"count\": 2, \"sum\": 6.28, \"min\": 2.14, \"max\": 4.14, \"mean\": 3.14, \"sum_sq_diff\": 2}}'::jsonb,
+                '{\"price\": {\"type\": \"float_agg\", \"count\": 1, \"sum\": 9.99, \"min\": 9.99, \"max\": 9.99, \"mean\": 9.99, \"sum_sq_diff\": 0}}'::jsonb
+            )",
+        );
+        let val = result.unwrap().unwrap().0;
+        let price = &val["price"];
+        assert_eq!(price["count"], 3);
+        assert_eq!(price["min"].to_string(), "2.14");
+        assert_eq!(price["max"].to_string(), "9.99");
+    }
+
+    #[pg_test]
+    fn test_final_float_agg() {
+        let result = Spi::get_one::<pgrx::JsonB>(
+            "SELECT jsonb_stats_final(
+                '{\"price\": {\"type\": \"float_agg\", \"count\": 2, \"sum\": 200, \"min\": 50, \"max\": 150, \"mean\": 100, \"sum_sq_diff\": 5000}}'::jsonb
+            )",
+        );
+        let val = result.unwrap().unwrap().0;
+        assert_eq!(val["type"], "stats_agg");
+        let price = &val["price"];
+        assert_eq!(price["type"], "float_agg");
+        assert_eq!(price["variance"].to_string(), "5000.00");
+        assert_eq!(price["stddev"].to_string(), "70.71");
+    }
+
+    // ── dec2 type tests ──
+
+    #[pg_test]
+    fn test_accum_init_dec2() {
+        let result = Spi::get_one::<pgrx::JsonB>(
+            "SELECT jsonb_stats_accum(
+                '{}'::jsonb,
+                '{\"amount\": {\"type\": \"dec2\", \"value\": 99.99}}'::jsonb
+            )",
+        );
+        let val = result.unwrap().unwrap().0;
+        let amount = &val["amount"];
+        assert_eq!(amount["type"], "dec2_agg");
+        assert_eq!(amount["count"], 1);
+    }
+
+    // ── nat type tests ──
+
+    #[pg_test]
+    fn test_accum_init_nat() {
+        let result = Spi::get_one::<pgrx::JsonB>(
+            "SELECT jsonb_stats_accum(
+                '{}'::jsonb,
+                '{\"headcount\": {\"type\": \"nat\", \"value\": 42}}'::jsonb
+            )",
+        );
+        let val = result.unwrap().unwrap().0;
+        let headcount = &val["headcount"];
+        assert_eq!(headcount["type"], "nat_agg");
+        assert_eq!(headcount["count"], 1);
+        assert_eq!(headcount["sum"], 42);
+    }
+
+    #[pg_test]
+    fn test_accum_nat_rejects_negative() {
+        // Negative value should produce null (no entry created)
+        let result = Spi::get_one::<pgrx::JsonB>(
+            "SELECT jsonb_stats_accum(
+                '{}'::jsonb,
+                '{\"headcount\": {\"type\": \"nat\", \"value\": -1}}'::jsonb
+            )",
+        );
+        let val = result.unwrap().unwrap().0;
+        assert!(val["headcount"].is_null());
+    }
+
+    #[pg_test]
+    fn test_accum_nat_skips_negative_update() {
+        // Init with valid value, then try negative update — should not change state
+        let result = Spi::get_one::<pgrx::JsonB>(
+            "SELECT jsonb_stats_accum(
+                jsonb_stats_accum(
+                    '{}'::jsonb,
+                    '{\"headcount\": {\"type\": \"nat\", \"value\": 10}}'::jsonb
+                ),
+                '{\"headcount\": {\"type\": \"nat\", \"value\": -5}}'::jsonb
+            )",
+        );
+        let val = result.unwrap().unwrap().0;
+        let headcount = &val["headcount"];
+        assert_eq!(headcount["count"], 1); // Still 1, negative was skipped
+        assert_eq!(headcount["sum"], 10);
+    }
+
+    // ── date type tests ──
+
+    #[pg_test]
+    fn test_accum_init_date() {
+        let result = Spi::get_one::<pgrx::JsonB>(
+            "SELECT jsonb_stats_accum(
+                '{}'::jsonb,
+                '{\"founded\": {\"type\": \"date\", \"value\": \"2024-01-15\"}}'::jsonb
+            )",
+        );
+        let val = result.unwrap().unwrap().0;
+        let founded = &val["founded"];
+        assert_eq!(founded["type"], "date_agg");
+        assert_eq!(founded["counts"]["2024-01-15"], 1);
+        assert_eq!(founded["min"], "2024-01-15");
+        assert_eq!(founded["max"], "2024-01-15");
+    }
+
+    #[pg_test]
+    fn test_accum_update_date() {
+        let result = Spi::get_one::<pgrx::JsonB>(
+            "SELECT jsonb_stats_accum(
+                jsonb_stats_accum(
+                    '{}'::jsonb,
+                    '{\"founded\": {\"type\": \"date\", \"value\": \"2024-01-15\"}}'::jsonb
+                ),
+                '{\"founded\": {\"type\": \"date\", \"value\": \"2023-06-01\"}}'::jsonb
+            )",
+        );
+        let val = result.unwrap().unwrap().0;
+        let founded = &val["founded"];
+        assert_eq!(founded["counts"]["2024-01-15"], 1);
+        assert_eq!(founded["counts"]["2023-06-01"], 1);
+        assert_eq!(founded["min"], "2023-06-01");
+        assert_eq!(founded["max"], "2024-01-15");
+    }
+
+    #[pg_test]
+    fn test_merge_date_agg() {
+        let result = Spi::get_one::<pgrx::JsonB>(
+            "SELECT jsonb_stats_merge(
+                '{\"founded\": {\"type\": \"date_agg\", \"counts\": {\"2024-01-15\": 2}, \"min\": \"2024-01-15\", \"max\": \"2024-01-15\"}}'::jsonb,
+                '{\"founded\": {\"type\": \"date_agg\", \"counts\": {\"2023-06-01\": 1, \"2024-01-15\": 1}, \"min\": \"2023-06-01\", \"max\": \"2024-01-15\"}}'::jsonb
+            )",
+        );
+        let val = result.unwrap().unwrap().0;
+        let founded = &val["founded"];
+        assert_eq!(founded["counts"]["2024-01-15"], 3);
+        assert_eq!(founded["counts"]["2023-06-01"], 1);
+        assert_eq!(founded["min"], "2023-06-01");
+        assert_eq!(founded["max"], "2024-01-15");
+    }
+
+    #[pg_test]
+    fn test_final_date_agg() {
+        // date_agg should pass through unchanged (no derived stats)
+        let result = Spi::get_one::<pgrx::JsonB>(
+            "SELECT jsonb_stats_final(
+                '{\"founded\": {\"type\": \"date_agg\", \"counts\": {\"2024-01-15\": 2}, \"min\": \"2024-01-15\", \"max\": \"2024-01-15\"}}'::jsonb
+            )",
+        );
+        let val = result.unwrap().unwrap().0;
+        assert_eq!(val["type"], "stats_agg");
+        let founded = &val["founded"];
+        assert_eq!(founded["type"], "date_agg");
+        assert_eq!(founded["counts"]["2024-01-15"], 2);
+    }
+
+    // ── Full pipeline with mixed types ──
+
+    #[pg_test]
+    fn test_full_pipeline_mixed_types() {
+        let result = Spi::get_one::<pgrx::JsonB>(
+            "WITH data(stats) AS (
+                VALUES
+                    ('{\"emp\": {\"type\": \"int\", \"value\": 150}, \"price\": {\"type\": \"float\", \"value\": 3.14}, \"founded\": {\"type\": \"date\", \"value\": \"2024-01-15\"}, \"ind\": {\"type\": \"str\", \"value\": \"tech\"}}'::jsonb),
+                    ('{\"emp\": {\"type\": \"int\", \"value\": 50}, \"price\": {\"type\": \"float\", \"value\": 2.72}, \"founded\": {\"type\": \"date\", \"value\": \"2023-06-01\"}, \"ind\": {\"type\": \"str\", \"value\": \"finance\"}}'::jsonb)
+            )
+            SELECT jsonb_stats_agg(stats) FROM data",
+        );
+        let val = result.unwrap().unwrap().0;
+        assert_eq!(val["type"], "stats_agg");
+        // int
+        assert_eq!(val["emp"]["type"], "int_agg");
+        assert_eq!(val["emp"]["count"], 2);
+        // float
+        assert_eq!(val["price"]["type"], "float_agg");
+        assert_eq!(val["price"]["count"], 2);
+        // date
+        assert_eq!(val["founded"]["type"], "date_agg");
+        assert_eq!(val["founded"]["min"], "2023-06-01");
+        assert_eq!(val["founded"]["max"], "2024-01-15");
+        // str
+        assert_eq!(val["ind"]["type"], "str_agg");
+        assert_eq!(val["ind"]["counts"]["tech"], 1);
+        assert_eq!(val["ind"]["counts"]["finance"], 1);
+    }
+
     // ── Benchmarks: Rust vs PL/pgSQL ──
 
     /// Time a SQL statement by running clock_timestamp() before/after via separate SPI calls.
