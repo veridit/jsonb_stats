@@ -370,6 +370,19 @@ The resulting `arr_agg` would be:
 }
 ```
 
+## Performance
+
+The Rust implementation (via pgrx) uses native `HashMap` state with `Box` heap allocation, avoiding JSONB serialization on every row. Benchmarks compare against the PL/pgSQL reference implementation:
+
+| Benchmark | Rust | PL/pgSQL | Speedup |
+|-----------|------|----------|---------|
+| `jsonb_stats_agg` — 10K rows, 3 types | 25ms | 13,316ms | **536x** |
+| `jsonb_stats_merge_agg` — 1K groups | 101ms | 792,783ms | **7,826x** |
+
+The merge speedup is larger because PL/pgSQL performs full JSONB serialization round-trips per group, while Rust merges native structs and only serializes once in the finalfunc.
+
+Benchmarks run as part of the test suite (`cargo pgrx test`). Results are written to `/tmp/jsonb_stats_benchmarks.txt`.
+
 ## Design Philosophy
 
 A key design feature of `jsonb_stats` is its use of a `stat` object (`{"type": "int", "value": 10}`). This structure is used to explicitly preserve the original SQL data type of a value (`bigint`, `float8`, `numeric(x,2)`, etc.) before it is aggregated.
