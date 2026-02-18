@@ -12,7 +12,7 @@ mod state;
 // Re-export all pg_extern functions so pgrx can discover them
 pub use accum::{jsonb_stats_accum, jsonb_stats_accum_sfunc};
 pub use final_fn::{jsonb_stats_final, jsonb_stats_final_internal};
-pub use merge::jsonb_stats_merge;
+pub use merge::{jsonb_stats_merge, jsonb_stats_merge_sfunc};
 pub use stat::{jsonb_stats_sfunc, stat, stats_from_jsonb};
 
 // Aggregate definitions using extension_sql!
@@ -26,14 +26,11 @@ CREATE AGGREGATE jsonb_stats_agg(jsonb) (
     finalfunc = jsonb_stats_final_internal
 );
 
--- stats_agg -> stats_agg (merge aggregates with final)
+-- stats_agg -> stats_agg (Internal state avoids serde_json round-trip per row)
 CREATE AGGREGATE jsonb_stats_merge_agg(jsonb) (
-    sfunc = jsonb_stats_merge,
-    stype = jsonb,
-    initcond = '{}',
-    finalfunc = jsonb_stats_final,
-    combinefunc = jsonb_stats_merge,
-    parallel = safe
+    sfunc = jsonb_stats_merge_sfunc,
+    stype = internal,
+    finalfunc = jsonb_stats_final_internal
 );
 
 -- (code, stat) -> stats (convenience aggregate)
@@ -54,6 +51,7 @@ LANGUAGE SQL IMMUTABLE STRICT PARALLEL SAFE;
         jsonb_stats_accum,
         jsonb_stats_accum_sfunc,
         jsonb_stats_merge,
+        jsonb_stats_merge_sfunc,
         jsonb_stats_final,
         jsonb_stats_final_internal,
         jsonb_stats_sfunc,
