@@ -1,5 +1,0 @@
-# jsonb_stats_zig extension
-comment = 'jsonb_stats extension written in Zig'
-default_version = '0.1'
-module_pathname = '$libdir/jsonb_stats_zig'
-relocatable = true

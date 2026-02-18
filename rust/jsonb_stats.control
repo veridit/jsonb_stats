@@ -1,0 +1,5 @@
+comment = 'Statistical aggregation using JSONB - Rust implementation'
+default_version = '@CARGO_VERSION@'
+module_pathname = '$libdir/jsonb_stats'
+relocatable = false
+superuser = false
