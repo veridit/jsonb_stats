@@ -630,6 +630,12 @@ mod tests {
     }
 
     // ── Benchmarks: Rust vs PL/pgSQL ──
+    //
+    // pgrx tests run inside the PostgreSQL server process, so eprintln/warning
+    // output goes to PG's stderr (invisible to the test runner). We write
+    // benchmark results to /tmp/jsonb_stats_benchmarks.txt so they survive.
+
+    const BENCHMARK_FILE: &str = "/tmp/jsonb_stats_benchmarks.txt";
 
     /// Time a SQL statement by running clock_timestamp() before/after via separate SPI calls.
     /// Uses SELECT INTO to force materialization of aggregate results.
@@ -646,6 +652,17 @@ mod tests {
         .unwrap()
         .unwrap();
         (t2 - t1) * 1000.0
+    }
+
+    fn log_benchmark(msg: &str) {
+        use std::io::Write;
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(BENCHMARK_FILE)
+        {
+            let _ = writeln!(f, "{}", msg);
+        }
     }
 
     #[pg_test]
@@ -670,10 +687,11 @@ mod tests {
         );
 
         let speedup = plpgsql_ms / rust_ms;
-        pgrx::warning!(
+        let msg = format!(
             "BENCHMARK accum 10K rows: Rust={:.0}ms, PL/pgSQL={:.0}ms, speedup={:.1}x",
             rust_ms, plpgsql_ms, speedup
         );
+        log_benchmark(&msg);
 
         // Verify correctness: both produce same count
         let ok = Spi::get_one::<bool>(
@@ -685,8 +703,7 @@ mod tests {
 
         assert!(
             rust_ms < plpgsql_ms,
-            "Rust ({:.0}ms) should be faster than PL/pgSQL ({:.0}ms)",
-            rust_ms, plpgsql_ms
+            "{msg} — Rust should be faster"
         );
     }
 
@@ -722,15 +739,15 @@ mod tests {
         );
 
         let speedup = plpgsql_ms / rust_ms;
-        pgrx::warning!(
+        let msg = format!(
             "BENCHMARK merge 1K groups: Rust={:.0}ms, PL/pgSQL={:.0}ms, speedup={:.1}x",
             rust_ms, plpgsql_ms, speedup
         );
+        log_benchmark(&msg);
 
         assert!(
             rust_ms < plpgsql_ms,
-            "Rust ({:.0}ms) should be faster than PL/pgSQL ({:.0}ms)",
-            rust_ms, plpgsql_ms
+            "{msg} — Rust should be faster"
         );
     }
 }
