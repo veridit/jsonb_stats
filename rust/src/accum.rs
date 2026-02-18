@@ -1,8 +1,11 @@
+use std::collections::HashMap;
+
 use pgrx::prelude::*;
-use pgrx::JsonB;
+use pgrx::{Internal, JsonB};
 use serde_json::{json, Map, Number, Value};
 
 use crate::helpers::*;
+use crate::state::{AggEntry, StatsState};
 
 /// Accumulate a single stats object into the running state (stats -> stats_agg).
 ///
@@ -264,4 +267,154 @@ fn update_arr_agg(mut obj: Map<String, Value>, stat: &Map<String, Value>) -> Val
 
     obj.insert("counts".to_string(), Value::Object(counts));
     Value::Object(obj)
+}
+
+// ── Internal-state sfunc for the aggregate (avoids serde_json round-trip per row) ──
+
+/// Aggregate sfunc using pgrx Internal state. The state is a native Rust
+/// StatsState allocated on the Rust heap (Box), avoiding both JSONB
+/// serialization per row and PostgreSQL memory context lifetime issues.
+#[pg_extern(immutable)]
+pub unsafe fn jsonb_stats_accum_sfunc(
+    internal: Internal,
+    stats: pgrx::JsonB,
+) -> Internal {
+    // Extract existing state or create new one on the Rust heap.
+    // Box::into_raw ensures the allocation survives PG memory context resets.
+    let state_ptr: *mut StatsState = match internal.unwrap() {
+        Some(datum) => datum.cast_mut_ptr::<StatsState>(),
+        None => Box::into_raw(Box::new(StatsState::default())),
+    };
+
+    let state = unsafe { &mut *state_ptr };
+
+    let stats_map = match stats.0 {
+        Value::Object(m) => m,
+        _ => {
+            return Internal::from(Some(pgrx::pg_sys::Datum::from(state_ptr as usize)));
+        }
+    };
+
+    for (key, stat_obj) in stats_map {
+        if key == "type" {
+            continue;
+        }
+
+        let stat_map = match stat_obj {
+            Value::Object(m) => m,
+            _ => continue,
+        };
+
+        let stat_type = match stat_map.get("type") {
+            Some(Value::String(s)) => s.clone(),
+            _ => continue,
+        };
+
+        if let Some(entry) = state.entries.get_mut(&key) {
+            update_entry(entry, &stat_map, &stat_type);
+        } else if let Some(entry) = init_entry(&stat_map, &stat_type) {
+            state.entries.insert(key, entry);
+        }
+    }
+
+    Internal::from(Some(pgrx::pg_sys::Datum::from(state_ptr as usize)))
+}
+
+fn init_entry(stat: &Map<String, Value>, stat_type: &str) -> Option<AggEntry> {
+    match stat_type {
+        "int" => {
+            let val = get_f64(stat, "value");
+            Some(AggEntry::IntAgg {
+                count: 1,
+                sum: val,
+                min: val,
+                max: val,
+                mean: val,
+                sum_sq_diff: 0.0,
+            })
+        }
+        "str" => {
+            let val_str = value_to_string(stat)?;
+            let mut counts = HashMap::new();
+            counts.insert(val_str, 1);
+            Some(AggEntry::StrAgg { counts })
+        }
+        "bool" => {
+            let val_str = value_to_string(stat)?;
+            let mut counts = HashMap::new();
+            counts.insert(val_str, 1);
+            Some(AggEntry::BoolAgg { counts })
+        }
+        "arr" => {
+            let mut counts = HashMap::new();
+            collect_arr_counts(stat, &mut counts);
+            Some(AggEntry::ArrAgg { count: 1, counts })
+        }
+        _ => None,
+    }
+}
+
+fn update_entry(entry: &mut AggEntry, stat: &Map<String, Value>, _stat_type: &str) {
+    match entry {
+        AggEntry::IntAgg {
+            count,
+            sum,
+            min,
+            max,
+            mean,
+            sum_sq_diff,
+        } => {
+            let val = get_f64(stat, "value");
+            *count += 1;
+            let delta = val - *mean;
+            *mean += delta / (*count as f64);
+            *sum_sq_diff += delta * (val - *mean);
+            *sum += val;
+            if val < *min {
+                *min = val;
+            }
+            if val > *max {
+                *max = val;
+            }
+        }
+        AggEntry::StrAgg { counts } | AggEntry::BoolAgg { counts } => {
+            if let Some(val_str) = value_to_string(stat) {
+                *counts.entry(val_str).or_insert(0) += 1;
+            }
+        }
+        AggEntry::ArrAgg { count, counts } => {
+            *count += 1;
+            collect_arr_counts(stat, counts);
+        }
+    }
+}
+
+fn value_to_string(stat: &Map<String, Value>) -> Option<String> {
+    match stat.get("value") {
+        Some(Value::String(s)) => Some(s.clone()),
+        Some(Value::Bool(b)) => Some(b.to_string()),
+        Some(Value::Number(n)) => Some(n.to_string()),
+        _ => None,
+    }
+}
+
+fn collect_arr_counts(stat: &Map<String, Value>, counts: &mut HashMap<String, i64>) {
+    if let Some(Value::Array(arr)) = stat.get("value") {
+        for elem in arr {
+            let key = match elem {
+                Value::String(s) => s.clone(),
+                Value::Number(n) => n.to_string(),
+                Value::Bool(b) => b.to_string(),
+                _ => continue,
+            };
+            *counts.entry(key).or_insert(0) += 1;
+        }
+    } else if let Some(Value::String(s)) = stat.get("value") {
+        let trimmed = s.trim_matches(|c| c == '{' || c == '}');
+        if !trimmed.is_empty() {
+            for elem in trimmed.split(',') {
+                *counts.entry(elem.trim().to_string()).or_insert(0) += 1;
+            }
+        }
+    }
 }

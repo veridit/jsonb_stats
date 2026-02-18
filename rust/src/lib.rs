@@ -7,10 +7,11 @@ mod final_fn;
 mod helpers;
 mod merge;
 mod stat;
+mod state;
 
 // Re-export all pg_extern functions so pgrx can discover them
-pub use accum::jsonb_stats_accum;
-pub use final_fn::jsonb_stats_final;
+pub use accum::{jsonb_stats_accum, jsonb_stats_accum_sfunc};
+pub use final_fn::{jsonb_stats_final, jsonb_stats_final_internal};
 pub use merge::jsonb_stats_merge;
 pub use stat::{jsonb_stats_sfunc, stat, stats_from_jsonb};
 
@@ -18,14 +19,11 @@ pub use stat::{jsonb_stats_sfunc, stat, stats_from_jsonb};
 // These must come after all function definitions (enforced by `requires`).
 extension_sql!(
     r#"
--- stats -> stats_agg (with final and parallel merge)
+-- stats -> stats_agg (Internal state avoids serde_json round-trip per row)
 CREATE AGGREGATE jsonb_stats_agg(jsonb) (
-    sfunc = jsonb_stats_accum,
-    stype = jsonb,
-    initcond = '{}',
-    finalfunc = jsonb_stats_final,
-    combinefunc = jsonb_stats_merge,
-    parallel = safe
+    sfunc = jsonb_stats_accum_sfunc,
+    stype = internal,
+    finalfunc = jsonb_stats_final_internal
 );
 
 -- stats_agg -> stats_agg (merge aggregates with final)
@@ -54,8 +52,10 @@ LANGUAGE SQL IMMUTABLE STRICT PARALLEL SAFE;
     name = "aggregates",
     requires = [
         jsonb_stats_accum,
+        jsonb_stats_accum_sfunc,
         jsonb_stats_merge,
         jsonb_stats_final,
+        jsonb_stats_final_internal,
         jsonb_stats_sfunc,
         stats_from_jsonb,
         stat
@@ -421,6 +421,111 @@ mod tests {
             SELECT r.agg = p.agg FROM global_rust r, global_plpgsql p",
         );
         assert_eq!(ok, Ok(Some(true)));
+    }
+
+    // ── Benchmarks: Rust vs PL/pgSQL ──
+
+    /// Time a SQL statement by running clock_timestamp() before/after via separate SPI calls.
+    /// Uses SELECT INTO to force materialization of aggregate results.
+    fn time_sql(query: &str) -> f64 {
+        let t1 = Spi::get_one::<f64>(
+            "SELECT extract(epoch from clock_timestamp())::float8",
+        )
+        .unwrap()
+        .unwrap();
+        Spi::run(query).unwrap();
+        let t2 = Spi::get_one::<f64>(
+            "SELECT extract(epoch from clock_timestamp())::float8",
+        )
+        .unwrap()
+        .unwrap();
+        (t2 - t1) * 1000.0
+    }
+
+    #[pg_test]
+    fn test_benchmark_accum_10k() {
+        load_plpgsql_reference();
+        Spi::run(
+            "CREATE TEMP TABLE bench_data AS
+             SELECT jsonb_build_object(
+                 'num', jsonb_build_object('type', 'int', 'value', floor(random() * 1000)::int),
+                 'str', jsonb_build_object('type', 'str', 'value', substr(md5(random()::text), 1, 5)),
+                 'ok',  jsonb_build_object('type', 'bool', 'value', random() > 0.5)
+             ) AS stats
+             FROM generate_series(1, 10000)",
+        )
+        .unwrap();
+
+        let rust_ms = time_sql(
+            "SELECT jsonb_stats_agg(stats) INTO TEMP TABLE accum_rust FROM bench_data",
+        );
+        let plpgsql_ms = time_sql(
+            "SELECT jsonb_stats_agg_plpgsql(stats) INTO TEMP TABLE accum_plpgsql FROM bench_data",
+        );
+
+        let speedup = plpgsql_ms / rust_ms;
+        pgrx::warning!(
+            "BENCHMARK accum 10K rows: Rust={:.0}ms, PL/pgSQL={:.0}ms, speedup={:.1}x",
+            rust_ms, plpgsql_ms, speedup
+        );
+
+        // Verify correctness: both produce same count
+        let ok = Spi::get_one::<bool>(
+            "SELECT (r.jsonb_stats_agg->'num'->>'count')::int
+                  = (p.jsonb_stats_agg_plpgsql->'num'->>'count')::int
+             FROM accum_rust r, accum_plpgsql p",
+        );
+        assert_eq!(ok, Ok(Some(true)), "Rust and PL/pgSQL counts must match");
+
+        assert!(
+            rust_ms < plpgsql_ms,
+            "Rust ({:.0}ms) should be faster than PL/pgSQL ({:.0}ms)",
+            rust_ms, plpgsql_ms
+        );
+    }
+
+    #[pg_test]
+    fn test_benchmark_merge_1k_groups() {
+        load_plpgsql_reference();
+
+        // Create 1000 pre-aggregated stats_agg objects (simulating regional summaries).
+        // Each group has ~100 rows, yielding large count maps for str_agg.
+        Spi::run(
+            "CREATE TEMP TABLE bench_agg_data AS
+             WITH raw AS (
+                 SELECT
+                     (i % 1000) AS grp,
+                     jsonb_build_object(
+                         'num', jsonb_build_object('type', 'int', 'value', floor(random() * 1000)::int),
+                         'str', jsonb_build_object('type', 'str', 'value', substr(md5(random()::text), 1, 5)),
+                         'ok',  jsonb_build_object('type', 'bool', 'value', random() > 0.5)
+                     ) AS stats
+                 FROM generate_series(1, 100000) i
+             )
+             SELECT jsonb_stats_agg(stats) AS agg
+             FROM raw
+             GROUP BY grp",
+        )
+        .unwrap();
+
+        let rust_ms = time_sql(
+            "SELECT jsonb_stats_merge_agg(agg) INTO TEMP TABLE merge_rust FROM bench_agg_data",
+        );
+        let plpgsql_ms = time_sql(
+            "SELECT jsonb_stats_merge_agg_plpgsql(agg) INTO TEMP TABLE merge_plpgsql FROM bench_agg_data",
+        );
+
+        let speedup = plpgsql_ms / rust_ms;
+        pgrx::warning!(
+            "BENCHMARK merge 1K groups: Rust={:.0}ms, PL/pgSQL={:.0}ms, speedup={:.1}x",
+            rust_ms, plpgsql_ms, speedup
+        );
+
+        assert!(
+            rust_ms < plpgsql_ms,
+            "Rust ({:.0}ms) should be faster than PL/pgSQL ({:.0}ms)",
+            rust_ms, plpgsql_ms
+        );
     }
 }
 
