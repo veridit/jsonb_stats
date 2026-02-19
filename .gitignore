@@ -1,2 +1,4 @@
 target/
 .aider*
+.claude/settings.local.json
+tmp/
