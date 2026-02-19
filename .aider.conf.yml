@@ -1,5 +1,0 @@
-read: [CONVENTIONS.md,README.md,REFERENCES.md]
-file: [todo.md,tmp/journal.md]
-auto-commits: false
-auto-lint: false
-watch-files: true
