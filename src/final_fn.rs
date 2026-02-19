@@ -94,7 +94,7 @@ fn finalize_num_agg(mut obj: Map<String, Value>) -> Value {
 
 // ── Internal-state finalfunc: converts StatsState → finalized JsonB ──
 
-#[pg_extern(immutable)]
+#[pg_extern(immutable, parallel_safe)]
 pub unsafe fn jsonb_stats_final_internal(internal: Internal) -> JsonB {
     let state_ptr: *mut StatsState = match internal.unwrap() {
         Some(datum) => datum.cast_mut_ptr::<StatsState>(),

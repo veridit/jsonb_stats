@@ -1,7 +1,10 @@
 use std::collections::HashMap;
 
+use serde::{Deserialize, Serialize};
+
 /// Common fields for all numeric aggregates (int, float, dec2, nat).
 /// Welford online algorithm methods live here — written once, used by all.
+#[derive(Serialize, Deserialize)]
 pub struct NumFields {
     pub count: i64,
     pub sum: f64,
@@ -61,11 +64,12 @@ impl NumFields {
 /// Native Rust state for the jsonb_stats_agg aggregate.
 /// By keeping this as a Rust struct (via pgrx Internal), we avoid
 /// serde_json serialization/deserialization on every sfunc call.
-#[derive(Default)]
+#[derive(Default, Serialize, Deserialize)]
 pub struct StatsState {
     pub entries: HashMap<String, AggEntry>,
 }
 
+#[derive(Serialize, Deserialize)]
 pub enum AggEntry {
     IntAgg(NumFields),
     FloatAgg(NumFields),

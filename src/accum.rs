@@ -355,7 +355,7 @@ fn update_date_agg(mut obj: Map<String, Value>, stat: &Map<String, Value>) -> Va
 /// Aggregate sfunc using pgrx Internal state. The state is a native Rust
 /// StatsState allocated on the Rust heap (Box), avoiding both JSONB
 /// serialization per row and PostgreSQL memory context lifetime issues.
-#[pg_extern(immutable)]
+#[pg_extern(immutable, parallel_safe)]
 pub unsafe fn jsonb_stats_accum_sfunc(
     internal: Internal,
     stats: pgrx::JsonB,

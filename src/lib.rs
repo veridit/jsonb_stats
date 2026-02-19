@@ -6,6 +6,7 @@ mod accum;
 mod final_fn;
 mod helpers;
 mod merge;
+mod parallel;
 mod stat;
 mod state;
 
@@ -13,24 +14,33 @@ mod state;
 pub use accum::{jsonb_stats_accum, jsonb_stats_accum_sfunc};
 pub use final_fn::{jsonb_stats_final, jsonb_stats_final_internal};
 pub use merge::{jsonb_stats_merge, jsonb_stats_merge_sfunc};
+pub use parallel::{jsonb_stats_combine, jsonb_stats_deserial, jsonb_stats_serial};
 pub use stat::{jsonb_stats_sfunc, stat, stats_from_jsonb};
 
 // Aggregate definitions using extension_sql!
 // These must come after all function definitions (enforced by `requires`).
 extension_sql!(
     r#"
--- stats -> stats_agg (Internal state avoids serde_json round-trip per row)
+-- stats -> stats_agg (parallel-safe with Internal state)
 CREATE AGGREGATE jsonb_stats_agg(jsonb) (
     sfunc = jsonb_stats_accum_sfunc,
     stype = internal,
-    finalfunc = jsonb_stats_final_internal
+    finalfunc = jsonb_stats_final_internal,
+    combinefunc = jsonb_stats_combine,
+    serialfunc = jsonb_stats_serial,
+    deserialfunc = jsonb_stats_deserial,
+    parallel = safe
 );
 
--- stats_agg -> stats_agg (Internal state avoids serde_json round-trip per row)
+-- stats_agg -> stats_agg (parallel-safe with Internal state)
 CREATE AGGREGATE jsonb_stats_merge_agg(jsonb) (
     sfunc = jsonb_stats_merge_sfunc,
     stype = internal,
-    finalfunc = jsonb_stats_final_internal
+    finalfunc = jsonb_stats_final_internal,
+    combinefunc = jsonb_stats_combine,
+    serialfunc = jsonb_stats_serial,
+    deserialfunc = jsonb_stats_deserial,
+    parallel = safe
 );
 
 -- (code, stat) -> stats (convenience aggregate)
@@ -45,6 +55,12 @@ CREATE FUNCTION stats(code text, val anyelement)
 RETURNS jsonb
 AS $$ SELECT stats(jsonb_build_object(code, stat(val))) $$
 LANGUAGE SQL IMMUTABLE STRICT PARALLEL SAFE;
+
+-- Scalar accum+final for a single row (avoids aggregate overhead)
+CREATE FUNCTION jsonb_stats_summarize(stats jsonb)
+RETURNS jsonb
+AS $$ SELECT jsonb_stats_final(jsonb_stats_accum('{}'::jsonb, stats)) $$
+LANGUAGE SQL IMMUTABLE STRICT PARALLEL SAFE;
 "#,
     name = "aggregates",
     requires = [
@@ -54,6 +70,9 @@ LANGUAGE SQL IMMUTABLE STRICT PARALLEL SAFE;
         jsonb_stats_merge_sfunc,
         jsonb_stats_final,
         jsonb_stats_final_internal,
+        jsonb_stats_combine,
+        jsonb_stats_serial,
+        jsonb_stats_deserial,
         jsonb_stats_sfunc,
         stats_from_jsonb,
         stat
@@ -586,6 +605,164 @@ mod tests {
         let founded = &val["founded"];
         assert_eq!(founded["type"], "date_agg");
         assert_eq!(founded["counts"]["2024-01-15"], 2);
+    }
+
+    // ── Parallel aggregation tests ──
+
+    #[pg_test]
+    fn test_parallel_agg_catalog() {
+        // Verify both aggregates have combinefunc, serialfunc, deserialfunc registered
+        let ok = Spi::get_one::<bool>(
+            "SELECT aggcombinefn != 0 AND aggserialfn != 0 AND aggdeserialfn != 0
+             FROM pg_aggregate
+             WHERE aggfnoid = 'jsonb_stats_agg(jsonb)'::regprocedure",
+        );
+        assert_eq!(ok, Ok(Some(true)), "jsonb_stats_agg should have parallel functions");
+
+        let ok = Spi::get_one::<bool>(
+            "SELECT aggcombinefn != 0 AND aggserialfn != 0 AND aggdeserialfn != 0
+             FROM pg_aggregate
+             WHERE aggfnoid = 'jsonb_stats_merge_agg(jsonb)'::regprocedure",
+        );
+        assert_eq!(ok, Ok(Some(true)), "jsonb_stats_merge_agg should have parallel functions");
+    }
+
+    #[pg_test]
+    fn test_state_serde_roundtrip() {
+        use crate::state::{AggEntry, NumFields, StatsState};
+        use std::collections::HashMap;
+
+        let mut state = StatsState::default();
+        state.entries.insert("i".to_string(), AggEntry::IntAgg(NumFields::init(100.0)));
+        state.entries.insert("f".to_string(), AggEntry::FloatAgg(NumFields::init(3.14)));
+        state.entries.insert("d".to_string(), AggEntry::Dec2Agg(NumFields::init(99.99)));
+        state.entries.insert("n".to_string(), AggEntry::NatAgg(NumFields::init(42.0)));
+        state.entries.insert("s".to_string(), AggEntry::StrAgg {
+            counts: HashMap::from([("tech".to_string(), 2), ("finance".to_string(), 1)]),
+        });
+        state.entries.insert("b".to_string(), AggEntry::BoolAgg {
+            counts: HashMap::from([("true".to_string(), 3), ("false".to_string(), 1)]),
+        });
+        state.entries.insert("a".to_string(), AggEntry::ArrAgg {
+            count: 5,
+            counts: HashMap::from([("x".to_string(), 3), ("y".to_string(), 2)]),
+        });
+        state.entries.insert("dt".to_string(), AggEntry::DateAgg {
+            counts: HashMap::from([("2024-01-15".to_string(), 2)]),
+            min_date: Some("2024-01-15".to_string()),
+            max_date: Some("2024-01-15".to_string()),
+        });
+
+        let bytes = serde_json::to_vec(&state).unwrap();
+        let roundtripped: StatsState = serde_json::from_slice(&bytes).unwrap();
+
+        assert_eq!(state.entries.len(), roundtripped.entries.len());
+        for key in state.entries.keys() {
+            assert!(roundtripped.entries.contains_key(key), "missing key: {}", key);
+        }
+    }
+
+    // ── jsonb_stats_summarize tests ──
+
+    #[pg_test]
+    fn test_summarize_basic() {
+        let result = Spi::get_one::<pgrx::JsonB>(
+            "SELECT jsonb_stats_summarize(
+                '{\"num\": {\"type\": \"int\", \"value\": 150}, \"ind\": {\"type\": \"str\", \"value\": \"tech\"}}'::jsonb
+            )",
+        );
+        let val = result.unwrap().unwrap().0;
+        assert_eq!(val["type"], "stats_agg");
+        assert_eq!(val["num"]["type"], "int_agg");
+        assert_eq!(val["num"]["count"], 1);
+        assert_eq!(val["ind"]["type"], "str_agg");
+        assert_eq!(val["ind"]["counts"]["tech"], 1);
+    }
+
+    #[pg_test]
+    fn test_summarize_matches_agg_single_row() {
+        let ok = Spi::get_one::<bool>(
+            "WITH data AS (
+                SELECT '{\"num\": {\"type\": \"int\", \"value\": 150}, \"ind\": {\"type\": \"str\", \"value\": \"tech\"}}'::jsonb AS stats
+            )
+            SELECT (SELECT jsonb_stats_summarize(stats) FROM data)
+                 = (SELECT jsonb_stats_agg(stats) FROM data)",
+        );
+        assert_eq!(ok, Ok(Some(true)));
+    }
+
+    // ── stat() with varchar ──
+
+    #[pg_test]
+    fn test_stat_varchar() {
+        let result = Spi::get_one::<pgrx::JsonB>(
+            "SELECT stat('hello'::varchar)",
+        );
+        let val = result.unwrap().unwrap().0;
+        assert_eq!(val["type"], "str");
+        assert_eq!(val["value"], "hello");
+    }
+
+    // ── Comprehensive comparison: Rust vs PL/pgSQL across all types ──
+
+    #[pg_test]
+    fn test_comparison_all_types_regression() {
+        load_plpgsql_reference();
+
+        // PL/pgSQL reference supports: int, str, bool
+        Spi::run(
+            "CREATE TEMP TABLE comparison_data(grp text, stats jsonb);
+             INSERT INTO comparison_data VALUES
+                ('A', '{\"i\": {\"type\": \"int\", \"value\": 100}, \"s\": {\"type\": \"str\", \"value\": \"tech\"}, \"b\": {\"type\": \"bool\", \"value\": true}}'),
+                ('A', '{\"i\": {\"type\": \"int\", \"value\": 200}, \"s\": {\"type\": \"str\", \"value\": \"finance\"}, \"b\": {\"type\": \"bool\", \"value\": false}}'),
+                ('B', '{\"i\": {\"type\": \"int\", \"value\": 500}, \"s\": {\"type\": \"str\", \"value\": \"tech\"}, \"b\": {\"type\": \"bool\", \"value\": true}}');",
+        ).unwrap();
+
+        // accum: single value
+        let ok = Spi::get_one::<bool>(
+            "SELECT jsonb_stats_accum('{}'::jsonb, stats) = jsonb_stats_accum_plpgsql('{}'::jsonb, stats)
+             FROM comparison_data LIMIT 1",
+        );
+        assert_eq!(ok, Ok(Some(true)), "accum single value mismatch");
+
+        // accum: two values
+        let ok = Spi::get_one::<bool>(
+            "WITH rows AS (SELECT stats, row_number() OVER () AS rn FROM comparison_data WHERE grp = 'A')
+             SELECT jsonb_stats_accum(
+                        jsonb_stats_accum('{}'::jsonb, (SELECT stats FROM rows WHERE rn = 1)),
+                        (SELECT stats FROM rows WHERE rn = 2))
+                  = jsonb_stats_accum_plpgsql(
+                        jsonb_stats_accum_plpgsql('{}'::jsonb, (SELECT stats FROM rows WHERE rn = 1)),
+                        (SELECT stats FROM rows WHERE rn = 2))",
+        );
+        assert_eq!(ok, Ok(Some(true)), "accum two values mismatch");
+
+        // agg: multi-row (each pipeline uses its own functions end-to-end)
+        let ok = Spi::get_one::<bool>(
+            "SELECT jsonb_stats_agg(stats) = jsonb_stats_agg_plpgsql(stats)
+             FROM comparison_data",
+        );
+        assert_eq!(ok, Ok(Some(true)), "agg mismatch");
+
+        // merge_agg: independent pipelines (Rust agg→Rust merge_agg vs PL/pgSQL agg→PL/pgSQL merge_agg)
+        // Finalized results match because round2 reconciles f64 vs numeric precision
+        let ok = Spi::get_one::<bool>(
+            "WITH by_grp_r AS (SELECT jsonb_stats_agg(stats) AS agg FROM comparison_data GROUP BY grp),
+                  by_grp_p AS (SELECT jsonb_stats_agg_plpgsql(stats) AS agg FROM comparison_data GROUP BY grp),
+                  rust_merged AS (SELECT jsonb_stats_merge_agg(agg) AS result FROM by_grp_r),
+                  plpgsql_merged AS (SELECT jsonb_stats_merge_agg_plpgsql(agg) AS result FROM by_grp_p)
+             SELECT r.result = p.result FROM rust_merged r, plpgsql_merged p",
+        );
+        assert_eq!(ok, Ok(Some(true)), "merge_agg mismatch");
+
+        // final: on single-row accum
+        let ok = Spi::get_one::<bool>(
+            "SELECT jsonb_stats_final(
+                        jsonb_stats_accum('{}'::jsonb, (SELECT stats FROM comparison_data LIMIT 1)))
+                  = jsonb_stats_final_plpgsql(
+                        jsonb_stats_accum_plpgsql('{}'::jsonb, (SELECT stats FROM comparison_data LIMIT 1)))",
+        );
+        assert_eq!(ok, Ok(Some(true)), "final mismatch");
     }
 
     // ── Error handling: fail fast on bad input ──

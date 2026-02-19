@@ -211,7 +211,7 @@ fn merge_date_agg(mut a_obj: Map<String, Value>, b_obj: &Map<String, Value>) -> 
 /// Merge sfunc using pgrx Internal state. Each input stats_agg JSONB is
 /// parsed once into native AggEntry types and merged into the HashMap state.
 /// The growing state is never serialized back to JSONB until the finalfunc.
-#[pg_extern(immutable)]
+#[pg_extern(immutable, parallel_safe)]
 pub unsafe fn jsonb_stats_merge_sfunc(internal: Internal, agg: pgrx::JsonB) -> Internal {
     let state_ptr: *mut StatsState = match internal.unwrap() {
         Some(datum) => datum.cast_mut_ptr::<StatsState>(),
@@ -303,7 +303,7 @@ fn parse_counts(obj: &Map<String, Value>) -> HashMap<String, i64> {
 }
 
 /// Welford parallel merge and count-map merge on native AggEntry types.
-fn merge_agg_entries(existing: &mut AggEntry, incoming: AggEntry, key: &str) {
+pub fn merge_agg_entries(existing: &mut AggEntry, incoming: AggEntry, key: &str) {
     // Fail fast on type mismatch
     let e_tag = existing.type_tag();
     let i_tag = incoming.type_tag();
