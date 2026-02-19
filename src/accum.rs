@@ -358,13 +358,18 @@ fn update_date_agg(mut obj: Map<String, Value>, stat: &Map<String, Value>) -> Va
 #[pg_extern(immutable, parallel_safe)]
 pub unsafe fn jsonb_stats_accum_sfunc(
     internal: Internal,
-    stats: pgrx::JsonB,
+    stats: Option<pgrx::JsonB>,
 ) -> Internal {
     // Extract existing state or create new one on the Rust heap.
     // Box::into_raw ensures the allocation survives PG memory context resets.
     let state_ptr: *mut StatsState = match internal.unwrap() {
         Some(datum) => datum.cast_mut_ptr::<StatsState>(),
         None => Box::into_raw(Box::new(StatsState::default())),
+    };
+
+    let stats = match stats {
+        Some(s) => s,
+        None => return Internal::from(Some(pgrx::pg_sys::Datum::from(state_ptr as usize))),
     };
 
     let state = unsafe { &mut *state_ptr };

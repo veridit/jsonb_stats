@@ -691,6 +691,43 @@ mod tests {
         assert_eq!(ok, Ok(Some(true)));
     }
 
+    // ── NULL input tolerance ──
+
+    #[pg_test]
+    fn test_merge_agg_null_input() {
+        let result = Spi::get_one::<pgrx::JsonB>(
+            "SELECT jsonb_stats_merge_agg(NULL::jsonb)",
+        );
+        let val = result.unwrap().unwrap().0;
+        assert_eq!(val["type"], "stats_agg");
+    }
+
+    #[pg_test]
+    fn test_merge_agg_mixed_null() {
+        let result = Spi::get_one::<pgrx::JsonB>(
+            "WITH data(agg) AS (
+                VALUES
+                    (NULL::jsonb),
+                    ('{\"num\": {\"type\": \"int_agg\", \"count\": 2, \"sum\": 200, \"min\": 50, \"max\": 150, \"mean\": 100, \"sum_sq_diff\": 5000}}'::jsonb),
+                    (NULL::jsonb)
+            )
+            SELECT jsonb_stats_merge_agg(agg) FROM data",
+        );
+        let val = result.unwrap().unwrap().0;
+        assert_eq!(val["type"], "stats_agg");
+        assert_eq!(val["num"]["count"], 2);
+        assert_eq!(val["num"]["sum"], 200);
+    }
+
+    #[pg_test]
+    fn test_accum_agg_null_input() {
+        let result = Spi::get_one::<pgrx::JsonB>(
+            "SELECT jsonb_stats_agg(NULL::jsonb)",
+        );
+        let val = result.unwrap().unwrap().0;
+        assert_eq!(val["type"], "stats_agg");
+    }
+
     // ── stat() with varchar ──
 
     #[pg_test]

@@ -212,10 +212,15 @@ fn merge_date_agg(mut a_obj: Map<String, Value>, b_obj: &Map<String, Value>) -> 
 /// parsed once into native AggEntry types and merged into the HashMap state.
 /// The growing state is never serialized back to JSONB until the finalfunc.
 #[pg_extern(immutable, parallel_safe)]
-pub unsafe fn jsonb_stats_merge_sfunc(internal: Internal, agg: pgrx::JsonB) -> Internal {
+pub unsafe fn jsonb_stats_merge_sfunc(internal: Internal, agg: Option<pgrx::JsonB>) -> Internal {
     let state_ptr: *mut StatsState = match internal.unwrap() {
         Some(datum) => datum.cast_mut_ptr::<StatsState>(),
         None => Box::into_raw(Box::new(StatsState::default())),
+    };
+
+    let agg = match agg {
+        Some(a) => a,
+        None => return Internal::from(Some(pgrx::pg_sys::Datum::from(state_ptr as usize))),
     };
 
     let state = unsafe { &mut *state_ptr };
