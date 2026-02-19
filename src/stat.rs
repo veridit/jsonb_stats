@@ -23,7 +23,7 @@ pub fn stat(value: AnyElement) -> JsonB {
         } else if oid == pg_sys::BOOLOID {
             let v = bool::from_datum(datum, false).unwrap_or(false);
             ("bool", json!(v))
-        } else if oid == pg_sys::TEXTOID {
+        } else if oid == pg_sys::TEXTOID || oid == pg_sys::VARCHAROID {
             let v = String::from_datum(datum, false).unwrap_or_default();
             ("str", json!(v))
         } else if oid == pg_sys::DATEOID {
