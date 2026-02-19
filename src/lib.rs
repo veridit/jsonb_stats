@@ -56,8 +56,8 @@ RETURNS jsonb
 AS $$ SELECT stats(jsonb_build_object(code, stat(val))) $$
 LANGUAGE SQL IMMUTABLE STRICT PARALLEL SAFE;
 
--- Scalar accum+final for a single row (avoids aggregate overhead)
-CREATE FUNCTION jsonb_stats_summarize(stats jsonb)
+-- Convert a single stats row to stats_agg (for merging with existing aggregates)
+CREATE FUNCTION jsonb_stats_to_agg(stats jsonb)
 RETURNS jsonb
 AS $$ SELECT jsonb_stats_final(jsonb_stats_accum('{}'::jsonb, stats)) $$
 LANGUAGE SQL IMMUTABLE STRICT PARALLEL SAFE;
@@ -662,12 +662,12 @@ mod tests {
         }
     }
 
-    // ── jsonb_stats_summarize tests ──
+    // ── jsonb_stats_to_agg tests ──
 
     #[pg_test]
-    fn test_summarize_basic() {
+    fn test_to_agg_basic() {
         let result = Spi::get_one::<pgrx::JsonB>(
-            "SELECT jsonb_stats_summarize(
+            "SELECT jsonb_stats_to_agg(
                 '{\"num\": {\"type\": \"int\", \"value\": 150}, \"ind\": {\"type\": \"str\", \"value\": \"tech\"}}'::jsonb
             )",
         );
@@ -680,12 +680,12 @@ mod tests {
     }
 
     #[pg_test]
-    fn test_summarize_matches_agg_single_row() {
+    fn test_to_agg_matches_agg_single_row() {
         let ok = Spi::get_one::<bool>(
             "WITH data AS (
                 SELECT '{\"num\": {\"type\": \"int\", \"value\": 150}, \"ind\": {\"type\": \"str\", \"value\": \"tech\"}}'::jsonb AS stats
             )
-            SELECT (SELECT jsonb_stats_summarize(stats) FROM data)
+            SELECT (SELECT jsonb_stats_to_agg(stats) FROM data)
                  = (SELECT jsonb_stats_agg(stats) FROM data)",
         );
         assert_eq!(ok, Ok(Some(true)));

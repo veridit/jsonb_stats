@@ -1,7 +1,8 @@
 # `jsonb_stats` Development Tasks
 
-## Next
+## Done
 
-- [ ] `jsonb_stats_summarize(stats jsonb)` — scalar function: accum+final for a single row (avoids awkward subquery wrapping of aggregate)
-- [ ] `combinefunc` + `parallel = safe` on aggregates (enables PostgreSQL parallel aggregation)
-- [ ] Comparison regression test: Rust vs PL/pgSQL output side-by-side for all functions
+- [x] `jsonb_stats_to_agg(stats jsonb)` — scalar function: converts stats → stats_agg for merging with existing aggregates
+- [x] `combinefunc` + `parallel = safe` on aggregates (enables PostgreSQL parallel aggregation)
+- [x] Comparison regression test: Rust vs PL/pgSQL output side-by-side for all functions
+- [x] `stat()` accepts `varchar` natively (no `::text` cast needed)

@@ -225,6 +225,26 @@ GROUP BY hf.valid_from, hf.valid_until;
 -- The resulting global stats_agg is shown in the Core Concepts section.
 ```
 
+### Converting Individual `stats` for Merging
+
+When rolling up data incrementally, you may need to merge an individual `stats` object with an existing `stats_agg`. Since `jsonb_stats_merge` operates on two `stats_agg` objects, the individual `stats` must first be converted. `jsonb_stats_to_agg` handles this conversion:
+
+```sql
+-- A new company arrives — convert its stats to stats_agg, then merge
+-- with the existing regional aggregate
+UPDATE history_facet
+SET stats_agg = jsonb_stats_merge(
+    stats_agg,
+    jsonb_stats_to_agg(new_company.stats)
+)
+WHERE region = new_company.region;
+```
+
+Without `jsonb_stats_to_agg`, you would need a subquery to wrap the aggregate call:
+```sql
+jsonb_stats_merge(stats_agg, (SELECT jsonb_stats_agg(s) FROM (VALUES (new_company.stats)) t(s)))
+```
+
 ### Structures in Detail
 
 The `stats_agg` object contains different summary structures depending on the data type being aggregated. The logic for these summaries is documented in `dev/reference_plpgsql.sql`.
@@ -443,7 +463,7 @@ While this adds a level of nesting compared to working with raw `jsonb` values, 
 
 | Function | Description |
 |----------|-------------|
-| `jsonb_stats_summarize(stats jsonb)` | Accumulate + finalize a single `stats` row (equivalent to `jsonb_stats_agg` on one row) |
+| `jsonb_stats_to_agg(stats jsonb)` | Convert a single `stats` → `stats_agg` (for merging with existing aggregates) |
 | `jsonb_stats_merge(a jsonb, b jsonb)` | Binary merge of two `stats_agg` objects (no aggregate context needed) |
 | `jsonb_stats_accum(state jsonb, stats jsonb)` | Low-level: accumulate one `stats` into running state |
 | `jsonb_stats_final(state jsonb)` | Low-level: compute derived stats (variance, stddev, cv_pct) on accumulated state |
