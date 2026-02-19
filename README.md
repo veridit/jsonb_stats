@@ -456,8 +456,8 @@ While this adds a level of nesting compared to working with raw `jsonb` values, 
 | Function | Description |
 |----------|-------------|
 | `jsonb_stats_agg(code text, stat jsonb)` | Pairs → `stats` (convenience for building stats row by row) |
-| `jsonb_stats_agg(stats jsonb)` | `stats` → `stats_agg` (accumulate + finalize with Welford statistics) |
-| `jsonb_stats_merge_agg(stats_agg jsonb)` | `stats_agg` → `stats_agg` (parallel merge of pre-aggregated summaries) |
+| `jsonb_stats_agg(stats jsonb)` | `stats` → `stats_agg` (accumulate + finalize with Welford statistics). NULL inputs are silently skipped. |
+| `jsonb_stats_merge_agg(stats_agg jsonb)` | `stats_agg` → `stats_agg` (parallel merge of pre-aggregated summaries). NULL inputs are silently skipped. |
 
 ### Scalar Functions
 
