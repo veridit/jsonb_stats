@@ -88,15 +88,12 @@ CREATE TABLE stat_for_unit (
     value_bool BOOLEAN,
     value_text TEXT,
     value_date DATE,
+    -- stat() is STRICT (returns NULL for NULL input), so COALESCE picks the non-null result
     stat JSONB GENERATED ALWAYS AS (
-        CASE
-            WHEN value_int IS NOT NULL THEN stat(value_int)
-            WHEN value_float IS NOT NULL THEN stat(value_float)
-            WHEN value_numeric IS NOT NULL THEN stat(value_numeric)
-            WHEN value_bool IS NOT NULL THEN stat(value_bool)
-            WHEN value_text IS NOT NULL THEN stat(value_text)
-            WHEN value_date IS NOT NULL THEN stat(value_date)
-        END
+        COALESCE(
+            stat(value_int), stat(value_float), stat(value_numeric),
+            stat(value_bool), stat(value_text), stat(value_date)
+        )
     ) STORED,
     CONSTRAINT one_value_must_be_set CHECK (
         (value_int IS NOT NULL)::int +
@@ -376,10 +373,28 @@ The Rust implementation (via pgrx) uses native `HashMap` state with `Box` heap a
 
 | Benchmark | Rust | PL/pgSQL | Speedup |
 |-----------|------|----------|---------|
-| `jsonb_stats_agg` — 10K rows, 3 types | 25ms | 13,316ms | **536x** |
-| `jsonb_stats_merge_agg` — 1K groups | 101ms | 792,783ms | **7,826x** |
+| `jsonb_stats_agg` — 10K rows, 3 types | 27ms | 14,015ms | **515x** |
+| `jsonb_stats_merge_agg` — 1K groups | 108ms | 797,240ms | **7,380x** |
 
 The merge speedup is larger because PL/pgSQL performs full JSONB serialization round-trips per group, while Rust merges native structs and only serializes once in the finalfunc.
+
+### Parallel aggregation
+
+Both `jsonb_stats_agg` and `jsonb_stats_merge_agg` declare `parallel = safe` with `combinefunc`, `serialfunc`, and `deserialfunc`. This means PostgreSQL can automatically split aggregation across multiple parallel workers on large tables — **no client changes required**.
+
+The planner enables parallelism based on table size and cost estimates. To verify a parallel plan is being used:
+
+```sql
+EXPLAIN (COSTS OFF)
+SELECT jsonb_stats_agg(stats) FROM large_table;
+-- Look for "Partial Aggregate" + "Gather" nodes
+```
+
+To tune parallelism (rarely needed — defaults work well):
+
+```sql
+SET max_parallel_workers_per_gather = 4;  -- default is 2
+```
 
 Benchmarks run as part of the test suite (`cargo pgrx test`). Results are written to `/tmp/jsonb_stats_benchmarks.txt`.
 
@@ -409,7 +424,7 @@ While this adds a level of nesting compared to working with raw `jsonb` values, 
 | `float8` | `float` | `float_agg` |
 | `numeric` | `dec2` | `dec2_agg` |
 | `date` | `date` | `date_agg` |
-| `text` | `str` | `str_agg` |
+| `text` / `varchar` | `str` | `str_agg` |
 | `boolean` | `bool` | `bool_agg` |
 | `array` | `arr` | `arr_agg` |
 | _(manual)_ | `nat` | `nat_agg` |
@@ -428,6 +443,7 @@ While this adds a level of nesting compared to working with raw `jsonb` values, 
 
 | Function | Description |
 |----------|-------------|
+| `jsonb_stats_summarize(stats jsonb)` | Accumulate + finalize a single `stats` row (equivalent to `jsonb_stats_agg` on one row) |
 | `jsonb_stats_merge(a jsonb, b jsonb)` | Binary merge of two `stats_agg` objects (no aggregate context needed) |
 | `jsonb_stats_accum(state jsonb, stats jsonb)` | Low-level: accumulate one `stats` into running state |
 | `jsonb_stats_final(state jsonb)` | Low-level: compute derived stats (variance, stddev, cv_pct) on accumulated state |

@@ -13,7 +13,7 @@ The PL/pgSQL reference (`dev/reference_plpgsql.sql`) is the authoritative spec �
 The Makefile handles the pgrx environment variables (macOS SDK path workaround):
 
 ```bash
-make test        # Run all tests (41 tests: correctness + error handling + benchmarks)
+make test        # Run all tests (47 tests: correctness + error handling + benchmarks)
 make run         # Launch psql with extension loaded
 make install     # Install into system PostgreSQL
 make package     # Build installable package
@@ -28,6 +28,7 @@ Benchmark results are written to `/tmp/jsonb_stats_benchmarks.txt` after each te
 - `src/stat.rs` — stat(), stats(), jsonb_stats_sfunc
 - `src/accum.rs` — jsonb_stats_accum + jsonb_stats_accum_sfunc (Internal state)
 - `src/merge.rs` — jsonb_stats_merge + jsonb_stats_merge_sfunc (Internal state)
+- `src/parallel.rs` — jsonb_stats_combine, jsonb_stats_serial, jsonb_stats_deserial (parallel aggregation)
 - `src/final_fn.rs` — jsonb_stats_final + jsonb_stats_final_internal
 - `src/state.rs` — StatsState/AggEntry native Rust types for Internal aggregate state
 - `src/helpers.rs` — get_f64, get_i64, get_str, num_value, round2

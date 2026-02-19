@@ -56,7 +56,7 @@ stat() → stats() → jsonb_stats_agg (accum + final) → jsonb_stats_merge_agg
 
 The pipeline uses two different state strategies:
 
-**Internal state (native HashMap)** — Used by `jsonb_stats_accum_sfunc` and `jsonb_stats_merge_sfunc`. State is a Rust `StatsState` struct allocated on the Rust heap (`Box::new`). This avoids JSONB serialization per row — the critical optimization that makes Rust ~500x faster than PL/pgSQL for accumulation.
+**Internal state (native HashMap)** — Used by `jsonb_stats_accum_sfunc`, `jsonb_stats_merge_sfunc`, and the parallel functions (`jsonb_stats_combine`, `jsonb_stats_serial`, `jsonb_stats_deserial`). State is a Rust `StatsState` struct allocated on the Rust heap (`Box::new`). This avoids JSONB serialization per row — the critical optimization that makes Rust ~500x faster than PL/pgSQL for accumulation.
 
 **JSONB state** — Used by the scalar `jsonb_stats_merge` function. Parses JSONB via serde_json, merges, serializes back. This is fine because merge is called O(groups) not O(rows).
 
@@ -90,16 +90,17 @@ combined_sum_sq_diff = a.sum_sq_diff + b.sum_sq_diff + delta² * a.count * b.cou
 
 All derived numeric fields are rounded to 2 decimal places.
 
-## Parallel Aggregation (not yet implemented)
+## Parallel Aggregation
 
-PostgreSQL can split aggregation across parallel workers if the aggregate declares:
-- `combinefunc` — merge two partial states (we already have `jsonb_stats_merge`)
-- `serialfunc` / `deserialfunc` — serialize Internal state to bytea for IPC
-- `parallel = safe`
+Both `jsonb_stats_agg` and `jsonb_stats_merge_agg` are `parallel = safe` with three supporting functions in `src/parallel.rs`:
 
-**Feasibility: YES.** The finalfunc already converts `StatsState` → JSONB; serialfunc can reuse that path (`Internal` → JSONB → bytea), deserialfunc reverses it. The combine function is `jsonb_stats_merge` (already exists and tested). Main work is writing the serfunc/deserfunc pair and declaring the aggregate attributes.
+- **`jsonb_stats_combine(internal, internal) → internal`** — Merges two partial `StatsState` structs using `merge_agg_entries`. Non-STRICT (handles NULL inputs from empty partitions). Borrows state1, takes ownership of state2 (freed after merge).
+- **`jsonb_stats_serial(internal) → bytea`** — Serializes `StatsState` to JSON bytes via `serde_json::to_vec`. Borrows state (does not free — PG may call multiple times). Called O(workers) not O(rows).
+- **`jsonb_stats_deserial(bytea, internal) → internal`** — Deserializes JSON bytes back to a `Box<StatsState>`. The second `internal` argument is required by PG but unused.
 
-**Impact:** Automatic multi-core parallelism for large tables. For Norway's 3.1M statistical units this could cut wall-clock time by ~Nx (N = parallel workers).
+`StatsState`, `AggEntry`, and `NumFields` all derive `Serialize`/`Deserialize` for this purpose.
+
+PostgreSQL automatically uses parallel plans when beneficial — no client changes required. The planner considers table size, `max_parallel_workers_per_gather`, and cost estimates.
 
 ## Error Handling
 
@@ -118,7 +119,7 @@ Benchmarks (Rust vs PL/pgSQL reference):
 
 | Benchmark | Rust | PL/pgSQL | Speedup |
 |-----------|------|----------|---------|
-| `jsonb_stats_agg` — 10K rows, 3 types | 25ms | 13,316ms | **536x** |
-| `jsonb_stats_merge_agg` — 1K groups | 101ms | 792,783ms | **7,826x** |
+| `jsonb_stats_agg` — 10K rows, 3 types | 27ms | 14,015ms | **515x** |
+| `jsonb_stats_merge_agg` — 1K groups | 108ms | 797,240ms | **7,380x** |
 
 The merge speedup is larger because PL/pgSQL performs full JSONB serialization round-trips per group, while Rust merges native structs and only serializes once in the finalfunc.
