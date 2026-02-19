@@ -49,12 +49,24 @@ fn merge_summaries(a: Value, b: Value) -> Value {
         _ => return Value::Object(a_obj),
     };
 
-    match get_type(&a_obj) {
+    let a_type = get_type(&a_obj);
+    let b_type = get_type(&b_obj);
+    if a_type != b_type {
+        pgrx::error!(
+            "jsonb_stats: type mismatch in merge: '{}' vs '{}'",
+            a_type, b_type
+        );
+    }
+
+    match a_type {
         "int_agg" | "float_agg" | "dec2_agg" | "nat_agg" => merge_num_agg(a_obj, &b_obj),
         "str_agg" | "bool_agg" => merge_count_agg(a_obj, &b_obj, false),
         "arr_agg" => merge_count_agg(a_obj, &b_obj, true),
         "date_agg" => merge_date_agg(a_obj, &b_obj),
-        _ => Value::Object(a_obj),
+        other => pgrx::error!(
+            "jsonb_stats: unknown aggregate type '{}'. Expected: int_agg, float_agg, dec2_agg, nat_agg, str_agg, bool_agg, arr_agg, date_agg",
+            other
+        ),
     }
 }
 
@@ -223,12 +235,11 @@ pub unsafe fn jsonb_stats_merge_sfunc(internal: Internal, agg: pgrx::JsonB) -> I
             _ => continue,
         };
 
-        if let Some(incoming) = parse_agg_entry(&obj) {
-            match state.entries.get_mut(&key) {
-                Some(existing) => merge_agg_entries(existing, incoming),
-                None => {
-                    state.entries.insert(key, incoming);
-                }
+        let incoming = parse_agg_entry(&obj);
+        match state.entries.get_mut(&key) {
+            Some(existing) => merge_agg_entries(existing, incoming, &key),
+            None => {
+                state.entries.insert(key, incoming);
             }
         }
     }
@@ -237,28 +248,31 @@ pub unsafe fn jsonb_stats_merge_sfunc(internal: Internal, agg: pgrx::JsonB) -> I
 }
 
 /// Parse a JSONB *_agg object into a native AggEntry.
-fn parse_agg_entry(obj: &Map<String, Value>) -> Option<AggEntry> {
+fn parse_agg_entry(obj: &Map<String, Value>) -> AggEntry {
     match get_type(obj) {
-        "int_agg" => Some(AggEntry::IntAgg(parse_num_fields(obj))),
-        "float_agg" => Some(AggEntry::FloatAgg(parse_num_fields(obj))),
-        "dec2_agg" => Some(AggEntry::Dec2Agg(parse_num_fields(obj))),
-        "nat_agg" => Some(AggEntry::NatAgg(parse_num_fields(obj))),
-        "str_agg" => Some(AggEntry::StrAgg {
+        "int_agg" => AggEntry::IntAgg(parse_num_fields(obj)),
+        "float_agg" => AggEntry::FloatAgg(parse_num_fields(obj)),
+        "dec2_agg" => AggEntry::Dec2Agg(parse_num_fields(obj)),
+        "nat_agg" => AggEntry::NatAgg(parse_num_fields(obj)),
+        "str_agg" => AggEntry::StrAgg {
             counts: parse_counts(obj),
-        }),
-        "bool_agg" => Some(AggEntry::BoolAgg {
+        },
+        "bool_agg" => AggEntry::BoolAgg {
             counts: parse_counts(obj),
-        }),
-        "arr_agg" => Some(AggEntry::ArrAgg {
+        },
+        "arr_agg" => AggEntry::ArrAgg {
             count: get_f64(obj, "count") as i64,
             counts: parse_counts(obj),
-        }),
-        "date_agg" => Some(AggEntry::DateAgg {
+        },
+        "date_agg" => AggEntry::DateAgg {
             counts: parse_counts(obj),
             min_date: get_str(obj, "min").map(|s| s.to_string()),
             max_date: get_str(obj, "max").map(|s| s.to_string()),
-        }),
-        _ => None,
+        },
+        other => pgrx::error!(
+            "jsonb_stats: unknown aggregate type '{}'. Expected: int_agg, float_agg, dec2_agg, nat_agg, str_agg, bool_agg, arr_agg, date_agg",
+            other
+        ),
     }
 }
 
@@ -289,7 +303,17 @@ fn parse_counts(obj: &Map<String, Value>) -> HashMap<String, i64> {
 }
 
 /// Welford parallel merge and count-map merge on native AggEntry types.
-fn merge_agg_entries(existing: &mut AggEntry, incoming: AggEntry) {
+fn merge_agg_entries(existing: &mut AggEntry, incoming: AggEntry, key: &str) {
+    // Fail fast on type mismatch
+    let e_tag = existing.type_tag();
+    let i_tag = incoming.type_tag();
+    if e_tag != i_tag {
+        pgrx::error!(
+            "jsonb_stats: type mismatch for key '{}': existing {} vs incoming {}",
+            key, e_tag, i_tag
+        );
+    }
+
     match (existing, incoming) {
         // All numeric types: use NumFields::merge
         (AggEntry::IntAgg(a), AggEntry::IntAgg(b))
@@ -347,6 +371,6 @@ fn merge_agg_entries(existing: &mut AggEntry, incoming: AggEntry) {
                 _ => {}
             }
         }
-        _ => {} // type mismatch — skip
+        _ => unreachable!(), // type_tag check above guarantees matching variants
     }
 }

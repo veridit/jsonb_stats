@@ -391,23 +391,63 @@ While this adds a level of nesting compared to working with raw `jsonb` values, 
 
 ## API
 
-The extension provides the following core functions and aggregates:
+### Constructor Functions
 
-*   **Constructor Functions**:
-    *   `stat(anyelement)`: Creates a `stat` JSONB object from any scalar value.
-    *   `stats(code text, value anyelement)`: A helper to create a `stats` object with a single key-value pair.
-*   **Aggregate Functions**:
-    *   `jsonb_stats_agg(code text, stat jsonb)`: Aggregates `(code, stat)` pairs into a single `stats` object.
-    *   `jsonb_stats_agg(stats jsonb)`: Aggregates `stats` objects (which contain `stat` values) into a `stats_agg` object.
-    *   `jsonb_stats_merge_agg(stats_agg jsonb)`: Merges multiple `stats_agg` objects into a single, higher-level summary.
+| Function | Description |
+|----------|-------------|
+| `stat(anyelement)` | Creates a typed `stat` JSONB from any scalar value |
+| `stats(jsonb)` | Adds `"type":"stats"` to a JSONB object containing stat entries |
+| `stats(code text, val anyelement)` | Shorthand: wraps `stat(val)` into a named stats object |
+
+### Type Mapping
+
+`stat()` automatically maps PostgreSQL types to stat types:
+
+| PostgreSQL type | Stat type | Aggregate type |
+|-----------------|-----------|----------------|
+| `integer` | `int` | `int_agg` |
+| `float8` | `float` | `float_agg` |
+| `numeric` | `dec2` | `dec2_agg` |
+| `date` | `date` | `date_agg` |
+| `text` | `str` | `str_agg` |
+| `boolean` | `bool` | `bool_agg` |
+| `array` | `arr` | `arr_agg` |
+| _(manual)_ | `nat` | `nat_agg` |
+
+`nat` has no automatic mapping — create manually: `jsonb_build_object('type','nat','value',42)`.
+
+### Aggregate Functions
+
+| Function | Description |
+|----------|-------------|
+| `jsonb_stats_agg(code text, stat jsonb)` | Pairs → `stats` (convenience for building stats row by row) |
+| `jsonb_stats_agg(stats jsonb)` | `stats` → `stats_agg` (accumulate + finalize with Welford statistics) |
+| `jsonb_stats_merge_agg(stats_agg jsonb)` | `stats_agg` → `stats_agg` (parallel merge of pre-aggregated summaries) |
+
+### Scalar Functions
+
+| Function | Description |
+|----------|-------------|
+| `jsonb_stats_merge(a jsonb, b jsonb)` | Binary merge of two `stats_agg` objects (no aggregate context needed) |
+| `jsonb_stats_accum(state jsonb, stats jsonb)` | Low-level: accumulate one `stats` into running state |
+| `jsonb_stats_final(state jsonb)` | Low-level: compute derived stats (variance, stddev, cv_pct) on accumulated state |
+
+### Error Handling
+
+The extension follows a **fail-fast** strategy. Invalid input raises a PostgreSQL `ERROR` (aborting the transaction) rather than silently producing wrong results:
+
+- **Unknown stat type** (e.g., `"type":"foo"`) → `ERROR: unknown stat type 'foo'`
+- **Missing or invalid value** (e.g., str stat with no `"value"` key) → `ERROR: missing or invalid 'value'`
+- **Negative nat value** → `ERROR: nat value must be >= 0`
+- **Type mismatch in merge** (e.g., merging `int_agg` with `str_agg` for the same key) → `ERROR: type mismatch`
+- **Unknown aggregate type** → `ERROR: unknown aggregate type`
 
 ## Installation
 
 The extension is built with [pgrx](https://github.com/pgcentralfoundation/pgrx) (Rust).
 
 ```sh
-cd rust
-cargo pgrx install    # Install into system PostgreSQL
+make install          # Install into system PostgreSQL
 ```
 
 Then, connect to your PostgreSQL database and enable the extension:

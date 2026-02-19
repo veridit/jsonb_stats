@@ -62,14 +62,17 @@ fn init_summary(stat: &Map<String, Value>, stat_type: &str) -> Value {
         "nat" => {
             let val = get_f64(stat, "value");
             if val < 0.0 {
-                return Value::Null;
+                pgrx::error!("jsonb_stats: nat value must be >= 0, got {}", val);
             }
             init_num_agg(stat, "nat")
         }
         "str" | "bool" => init_str_or_bool_agg(stat, stat_type),
         "arr" => init_arr_agg(stat),
         "date" => init_date_agg(stat),
-        _ => Value::Object(stat.clone()),
+        other => pgrx::error!(
+            "jsonb_stats: unknown stat type '{}'. Expected: int, float, dec2, nat, str, bool, arr, date",
+            other
+        ),
     }
 }
 
@@ -92,7 +95,7 @@ fn init_str_or_bool_agg(stat: &Map<String, Value>, stat_type: &str) -> Value {
         Some(Value::String(s)) => s.clone(),
         Some(Value::Bool(b)) => b.to_string(),
         Some(Value::Number(n)) => n.to_string(),
-        _ => return Value::Null,
+        _ => pgrx::error!("jsonb_stats: stat of type '{}' has missing or invalid 'value'", stat_type),
     };
 
     let agg_type = format!("{}_agg", stat_type);
@@ -154,7 +157,7 @@ fn init_arr_agg(stat: &Map<String, Value>) -> Value {
 fn init_date_agg(stat: &Map<String, Value>) -> Value {
     let date_str = match stat.get("value") {
         Some(Value::String(s)) => s.clone(),
-        _ => return Value::Null,
+        _ => pgrx::error!("jsonb_stats: date stat requires a string 'value'"),
     };
 
     let mut counts = Map::new();
@@ -180,14 +183,17 @@ fn update_summary(current: Value, stat: &Map<String, Value>, stat_type: &str) ->
         "nat" => {
             let val = get_f64(stat, "value");
             if val < 0.0 {
-                return Value::Object(current_obj);
+                pgrx::error!("jsonb_stats: nat value must be >= 0, got {}", val);
             }
             update_num_agg(current_obj, stat)
         }
         "str" | "bool" => update_str_or_bool_agg(current_obj, stat),
         "arr" => update_arr_agg(current_obj, stat),
         "date" => update_date_agg(current_obj, stat),
-        _ => Value::Object(current_obj),
+        other => pgrx::error!(
+            "jsonb_stats: unknown stat type '{}'. Expected: int, float, dec2, nat, str, bool, arr, date",
+            other
+        ),
     }
 }
 
@@ -387,66 +393,71 @@ pub unsafe fn jsonb_stats_accum_sfunc(
 
         if let Some(entry) = state.entries.get_mut(&key) {
             update_entry(entry, &stat_map, &stat_type);
-        } else if let Some(entry) = init_entry(&stat_map, &stat_type) {
-            state.entries.insert(key, entry);
+        } else {
+            state.entries.insert(key, init_entry(&stat_map, &stat_type));
         }
     }
 
     Internal::from(Some(pgrx::pg_sys::Datum::from(state_ptr as usize)))
 }
 
-fn init_entry(stat: &Map<String, Value>, stat_type: &str) -> Option<AggEntry> {
+fn init_entry(stat: &Map<String, Value>, stat_type: &str) -> AggEntry {
     match stat_type {
         "int" => {
             let val = get_f64(stat, "value");
-            Some(AggEntry::IntAgg(NumFields::init(val)))
+            AggEntry::IntAgg(NumFields::init(val))
         }
         "float" => {
             let val = get_f64(stat, "value");
-            Some(AggEntry::FloatAgg(NumFields::init(val)))
+            AggEntry::FloatAgg(NumFields::init(val))
         }
         "dec2" => {
             let val = get_f64(stat, "value");
-            Some(AggEntry::Dec2Agg(NumFields::init(val)))
+            AggEntry::Dec2Agg(NumFields::init(val))
         }
         "nat" => {
             let val = get_f64(stat, "value");
             if val < 0.0 {
-                return None;
+                pgrx::error!("jsonb_stats: nat value must be >= 0, got {}", val);
             }
-            Some(AggEntry::NatAgg(NumFields::init(val)))
+            AggEntry::NatAgg(NumFields::init(val))
         }
         "str" => {
-            let val_str = value_to_string(stat)?;
+            let val_str = value_to_string(stat)
+                .unwrap_or_else(|| pgrx::error!("jsonb_stats: stat of type 'str' has missing or invalid 'value'"));
             let mut counts = HashMap::new();
             counts.insert(val_str, 1);
-            Some(AggEntry::StrAgg { counts })
+            AggEntry::StrAgg { counts }
         }
         "bool" => {
-            let val_str = value_to_string(stat)?;
+            let val_str = value_to_string(stat)
+                .unwrap_or_else(|| pgrx::error!("jsonb_stats: stat of type 'bool' has missing or invalid 'value'"));
             let mut counts = HashMap::new();
             counts.insert(val_str, 1);
-            Some(AggEntry::BoolAgg { counts })
+            AggEntry::BoolAgg { counts }
         }
         "arr" => {
             let mut counts = HashMap::new();
             collect_arr_counts(stat, &mut counts);
-            Some(AggEntry::ArrAgg { count: 1, counts })
+            AggEntry::ArrAgg { count: 1, counts }
         }
         "date" => {
             let date_str = match stat.get("value") {
                 Some(Value::String(s)) => s.clone(),
-                _ => return None,
+                _ => pgrx::error!("jsonb_stats: date stat requires a string 'value'"),
             };
             let mut counts = HashMap::new();
             counts.insert(date_str.clone(), 1);
-            Some(AggEntry::DateAgg {
+            AggEntry::DateAgg {
                 counts,
                 min_date: Some(date_str.clone()),
                 max_date: Some(date_str),
-            })
+            }
         }
-        _ => None,
+        other => pgrx::error!(
+            "jsonb_stats: unknown stat type '{}'. Expected: int, float, dec2, nat, str, bool, arr, date",
+            other
+        ),
     }
 }
 
@@ -458,9 +469,10 @@ fn update_entry(entry: &mut AggEntry, stat: &Map<String, Value>, _stat_type: &st
         }
         AggEntry::NatAgg(f) => {
             let val = get_f64(stat, "value");
-            if val >= 0.0 {
-                f.update(val);
+            if val < 0.0 {
+                pgrx::error!("jsonb_stats: nat value must be >= 0, got {}", val);
             }
+            f.update(val);
         }
         AggEntry::StrAgg { counts } | AggEntry::BoolAgg { counts } => {
             if let Some(val_str) = value_to_string(stat) {

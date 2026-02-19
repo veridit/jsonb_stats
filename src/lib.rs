@@ -500,35 +500,24 @@ mod tests {
         assert_eq!(headcount["sum"], 42);
     }
 
-    #[pg_test]
+    #[pg_test(error = "jsonb_stats: nat value must be >= 0, got -1")]
     fn test_accum_nat_rejects_negative() {
-        // Negative value should produce null (no entry created)
-        let result = Spi::get_one::<pgrx::JsonB>(
-            "SELECT jsonb_stats_accum(
-                '{}'::jsonb,
-                '{\"headcount\": {\"type\": \"nat\", \"value\": -1}}'::jsonb
-            )",
+        crate::jsonb_stats_accum(
+            pgrx::JsonB(serde_json::json!({})),
+            pgrx::JsonB(serde_json::json!({"headcount": {"type": "nat", "value": -1}})),
         );
-        let val = result.unwrap().unwrap().0;
-        assert!(val["headcount"].is_null());
     }
 
-    #[pg_test]
-    fn test_accum_nat_skips_negative_update() {
-        // Init with valid value, then try negative update — should not change state
-        let result = Spi::get_one::<pgrx::JsonB>(
-            "SELECT jsonb_stats_accum(
-                jsonb_stats_accum(
-                    '{}'::jsonb,
-                    '{\"headcount\": {\"type\": \"nat\", \"value\": 10}}'::jsonb
-                ),
-                '{\"headcount\": {\"type\": \"nat\", \"value\": -5}}'::jsonb
-            )",
+    #[pg_test(error = "jsonb_stats: nat value must be >= 0, got -5")]
+    fn test_accum_nat_rejects_negative_update() {
+        let first = crate::jsonb_stats_accum(
+            pgrx::JsonB(serde_json::json!({})),
+            pgrx::JsonB(serde_json::json!({"headcount": {"type": "nat", "value": 10}})),
         );
-        let val = result.unwrap().unwrap().0;
-        let headcount = &val["headcount"];
-        assert_eq!(headcount["count"], 1); // Still 1, negative was skipped
-        assert_eq!(headcount["sum"], 10);
+        crate::jsonb_stats_accum(
+            first,
+            pgrx::JsonB(serde_json::json!({"headcount": {"type": "nat", "value": -5}})),
+        );
     }
 
     // ── date type tests ──
@@ -597,6 +586,52 @@ mod tests {
         let founded = &val["founded"];
         assert_eq!(founded["type"], "date_agg");
         assert_eq!(founded["counts"]["2024-01-15"], 2);
+    }
+
+    // ── Error handling: fail fast on bad input ──
+    //
+    // These tests call functions directly (not through SPI) so that
+    // pgrx::error!() propagates to the #[pg_test(error)] handler.
+    // SPI catches PG ERRORs in subtransactions, hiding them from the handler.
+
+    #[pg_test(error = "jsonb_stats: unknown stat type 'foo'. Expected: int, float, dec2, nat, str, bool, arr, date")]
+    fn test_accum_rejects_unknown_type() {
+        crate::jsonb_stats_accum(
+            pgrx::JsonB(serde_json::json!({})),
+            pgrx::JsonB(serde_json::json!({"x": {"type": "foo", "value": 1}})),
+        );
+    }
+
+    #[pg_test(error = "jsonb_stats: stat of type 'str' has missing or invalid 'value'")]
+    fn test_accum_rejects_missing_value() {
+        crate::jsonb_stats_accum(
+            pgrx::JsonB(serde_json::json!({})),
+            pgrx::JsonB(serde_json::json!({"x": {"type": "str"}})),
+        );
+    }
+
+    #[pg_test(error = "jsonb_stats: date stat requires a string 'value'")]
+    fn test_accum_rejects_date_with_numeric_value() {
+        crate::jsonb_stats_accum(
+            pgrx::JsonB(serde_json::json!({})),
+            pgrx::JsonB(serde_json::json!({"x": {"type": "date", "value": 42}})),
+        );
+    }
+
+    #[pg_test(error = "jsonb_stats: type mismatch in merge: 'int_agg' vs 'str_agg'")]
+    fn test_merge_rejects_type_mismatch() {
+        crate::jsonb_stats_merge(
+            pgrx::JsonB(serde_json::json!({"x": {"type": "int_agg", "count": 1, "sum": 1, "min": 1, "max": 1, "mean": 1, "sum_sq_diff": 0}})),
+            pgrx::JsonB(serde_json::json!({"x": {"type": "str_agg", "counts": {"a": 1}}})),
+        );
+    }
+
+    #[pg_test(error = "jsonb_stats: unknown aggregate type 'foo_agg'. Expected: int_agg, float_agg, dec2_agg, nat_agg, str_agg, bool_agg, arr_agg, date_agg")]
+    fn test_merge_rejects_unknown_agg_type() {
+        crate::jsonb_stats_merge(
+            pgrx::JsonB(serde_json::json!({"x": {"type": "foo_agg", "count": 1}})),
+            pgrx::JsonB(serde_json::json!({"x": {"type": "foo_agg", "count": 1}})),
+        );
     }
 
     // ── Full pipeline with mixed types ──
