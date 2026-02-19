@@ -66,7 +66,7 @@ mod tests {
     use pgrx::prelude::*;
 
     fn load_plpgsql_reference() {
-        Spi::run(include_str!("../../dev/reference_plpgsql.sql"))
+        Spi::run(include_str!("../dev/reference_plpgsql.sql"))
             .expect("Failed to load PL/pgSQL reference");
     }
 

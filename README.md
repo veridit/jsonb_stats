@@ -430,7 +430,6 @@ git config core.hooksPath devops/githooks
 The extension is implemented in Rust via [pgrx](https://github.com/pgcentralfoundation/pgrx). To run the test suite:
 
 ```sh
-cd rust
-cargo pgrx test       # Run all tests (including benchmarks)
-cargo pgrx run        # Launch psql with extension loaded
+make test             # Run all tests (including benchmarks)
+make run              # Launch psql with extension loaded
 ```
