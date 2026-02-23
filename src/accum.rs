@@ -231,7 +231,10 @@ fn update_str_or_bool_agg(mut obj: Map<String, Value>, stat: &Map<String, Value>
         Some(Value::String(s)) => s.clone(),
         Some(Value::Bool(b)) => b.to_string(),
         Some(Value::Number(n)) => n.to_string(),
-        _ => return Value::Object(obj),
+        _ => {
+            let stat_type = get_type(&obj).trim_end_matches("_agg");
+            pgrx::error!("jsonb_stats: stat of type '{}' has missing or invalid 'value'", stat_type);
+        }
     };
 
     let mut counts: Map<String, Value> = obj
@@ -313,7 +316,7 @@ fn update_arr_agg(mut obj: Map<String, Value>, stat: &Map<String, Value>) -> Val
 fn update_date_agg(mut obj: Map<String, Value>, stat: &Map<String, Value>) -> Value {
     let date_str = match stat.get("value") {
         Some(Value::String(s)) => s.clone(),
-        _ => return Value::Object(obj),
+        _ => pgrx::error!("jsonb_stats: date stat requires a string 'value'"),
     };
 
     // Update counts
@@ -466,7 +469,7 @@ fn init_entry(stat: &Map<String, Value>, stat_type: &str) -> AggEntry {
     }
 }
 
-fn update_entry(entry: &mut AggEntry, stat: &Map<String, Value>, _stat_type: &str) {
+fn update_entry(entry: &mut AggEntry, stat: &Map<String, Value>, stat_type: &str) {
     match entry {
         AggEntry::IntAgg(f) | AggEntry::FloatAgg(f) | AggEntry::Dec2Agg(f) => {
             let val = get_f64(stat, "value");
@@ -480,9 +483,10 @@ fn update_entry(entry: &mut AggEntry, stat: &Map<String, Value>, _stat_type: &st
             f.update(val);
         }
         AggEntry::StrAgg { counts } | AggEntry::BoolAgg { counts } => {
-            if let Some(val_str) = value_to_string(stat) {
-                *counts.entry(val_str).or_insert(0) += 1;
-            }
+            let val_str = value_to_string(stat).unwrap_or_else(|| {
+                pgrx::error!("jsonb_stats: stat of type '{}' has missing or invalid 'value'", stat_type)
+            });
+            *counts.entry(val_str).or_insert(0) += 1;
         }
         AggEntry::ArrAgg { count, counts } => {
             *count += 1;
@@ -493,18 +497,20 @@ fn update_entry(entry: &mut AggEntry, stat: &Map<String, Value>, _stat_type: &st
             min_date,
             max_date,
         } => {
-            if let Some(Value::String(date_str)) = stat.get("value") {
-                *counts.entry(date_str.clone()).or_insert(0) += 1;
-                match min_date {
-                    Some(cur) if date_str < cur => *min_date = Some(date_str.clone()),
-                    None => *min_date = Some(date_str.clone()),
-                    _ => {}
-                }
-                match max_date {
-                    Some(cur) if date_str > cur => *max_date = Some(date_str.clone()),
-                    None => *max_date = Some(date_str.clone()),
-                    _ => {}
-                }
+            let date_str = match stat.get("value") {
+                Some(Value::String(s)) => s,
+                _ => pgrx::error!("jsonb_stats: date stat requires a string 'value'"),
+            };
+            *counts.entry(date_str.clone()).or_insert(0) += 1;
+            match min_date {
+                Some(cur) if date_str < cur => *min_date = Some(date_str.clone()),
+                None => *min_date = Some(date_str.clone()),
+                _ => {}
+            }
+            match max_date {
+                Some(cur) if date_str > cur => *max_date = Some(date_str.clone()),
+                None => *max_date = Some(date_str.clone()),
+                _ => {}
             }
         }
     }
