@@ -878,6 +878,321 @@ mod tests {
         assert_eq!(val["ind"]["counts"]["finance"], 1);
     }
 
+    // ── Group A: stat() edge cases ──
+
+    #[pg_test]
+    fn test_stat_zero() {
+        let result = Spi::get_one::<pgrx::JsonB>("SELECT stat(0)");
+        let val = result.unwrap().unwrap().0;
+        assert_eq!(val["type"], "int");
+        assert_eq!(val["value"], 0);
+    }
+
+    #[pg_test]
+    fn test_stat_negative() {
+        let result = Spi::get_one::<pgrx::JsonB>("SELECT stat(-42)");
+        let val = result.unwrap().unwrap().0;
+        assert_eq!(val["type"], "int");
+        assert_eq!(val["value"], -42);
+    }
+
+    #[pg_test]
+    fn test_stat_float_extreme() {
+        let result = Spi::get_one::<pgrx::JsonB>("SELECT stat(1e308::float8)");
+        let val = result.unwrap().unwrap().0;
+        assert_eq!(val["type"], "float");
+    }
+
+    #[pg_test]
+    fn test_stat_empty_string() {
+        let result = Spi::get_one::<pgrx::JsonB>("SELECT stat(''::text)");
+        let val = result.unwrap().unwrap().0;
+        assert_eq!(val["type"], "str");
+        assert_eq!(val["value"], "");
+    }
+
+    // ── Group B: Empty/NULL inputs ──
+
+    #[pg_test]
+    fn test_accum_empty_stats() {
+        let result = Spi::get_one::<pgrx::JsonB>(
+            "SELECT jsonb_stats_accum('{}'::jsonb, '{}'::jsonb)",
+        );
+        let val = result.unwrap().unwrap().0;
+        assert_eq!(val, serde_json::json!({}));
+    }
+
+    #[pg_test]
+    fn test_merge_empty_inputs() {
+        let result = Spi::get_one::<pgrx::JsonB>(
+            "SELECT jsonb_stats_merge('{}'::jsonb, '{}'::jsonb)",
+        );
+        let val = result.unwrap().unwrap().0;
+        assert_eq!(val, serde_json::json!({}));
+    }
+
+    #[pg_test]
+    fn test_final_empty_state() {
+        let result = Spi::get_one::<pgrx::JsonB>(
+            "SELECT jsonb_stats_final('{}'::jsonb)",
+        );
+        let val = result.unwrap().unwrap().0;
+        assert_eq!(val["type"], "stats_agg");
+    }
+
+    #[pg_test]
+    fn test_agg_all_nulls() {
+        let result = Spi::get_one::<pgrx::JsonB>(
+            "WITH data(stats) AS (
+                VALUES (NULL::jsonb), (NULL::jsonb), (NULL::jsonb)
+            )
+            SELECT jsonb_stats_agg(stats) FROM data",
+        );
+        let val = result.unwrap().unwrap().0;
+        assert_eq!(val["type"], "stats_agg");
+    }
+
+    // ── Group C: Invalid JSONB shapes ──
+
+    #[pg_test]
+    fn test_accum_non_object_input() {
+        let result = Spi::get_one::<pgrx::JsonB>(
+            "SELECT jsonb_stats_accum('{}'::jsonb, '[1,2,3]'::jsonb)",
+        );
+        let val = result.unwrap().unwrap().0;
+        assert_eq!(val, serde_json::json!({}));
+    }
+
+    #[pg_test]
+    fn test_accum_scalar_input() {
+        let result = Spi::get_one::<pgrx::JsonB>(
+            "SELECT jsonb_stats_accum('{}'::jsonb, '42'::jsonb)",
+        );
+        let val = result.unwrap().unwrap().0;
+        assert_eq!(val, serde_json::json!({}));
+    }
+
+    #[pg_test]
+    fn test_merge_non_object_summaries() {
+        // scalar value on one side, valid on the other — adopts the valid side
+        let result = Spi::get_one::<pgrx::JsonB>(
+            "SELECT jsonb_stats_merge(
+                '{\"x\": 42}'::jsonb,
+                '{\"x\": {\"type\": \"str_agg\", \"counts\": {\"a\": 1}}}'::jsonb
+            )",
+        );
+        let val = result.unwrap().unwrap().0;
+        assert_eq!(val["x"]["type"], "str_agg");
+        assert_eq!(val["x"]["counts"]["a"], 1);
+    }
+
+    // ── Group D: Parallel aggregation with real data ──
+
+    #[pg_test]
+    fn test_parallel_serial_deserial_roundtrip() {
+        // Simulate two-worker aggregation: accum into two separate states, merge
+        let result = Spi::get_one::<bool>(
+            "WITH
+                w1 AS (
+                    SELECT jsonb_stats_accum(
+                        jsonb_stats_accum('{}'::jsonb,
+                            '{\"x\": {\"type\": \"int\", \"value\": 10}}'::jsonb),
+                        '{\"x\": {\"type\": \"int\", \"value\": 20}}'::jsonb) AS agg
+                ),
+                w2 AS (
+                    SELECT jsonb_stats_accum(
+                        jsonb_stats_accum('{}'::jsonb,
+                            '{\"x\": {\"type\": \"int\", \"value\": 30}}'::jsonb),
+                        '{\"x\": {\"type\": \"int\", \"value\": 40}}'::jsonb) AS agg
+                ),
+                merged AS (
+                    SELECT jsonb_stats_merge_agg(agg) AS result
+                    FROM (SELECT agg FROM w1 UNION ALL SELECT agg FROM w2) t
+                ),
+                direct AS (
+                    SELECT jsonb_stats_agg(stats) AS result
+                    FROM (VALUES
+                        ('{\"x\": {\"type\": \"int\", \"value\": 10}}'::jsonb),
+                        ('{\"x\": {\"type\": \"int\", \"value\": 20}}'::jsonb),
+                        ('{\"x\": {\"type\": \"int\", \"value\": 30}}'::jsonb),
+                        ('{\"x\": {\"type\": \"int\", \"value\": 40}}'::jsonb)
+                    ) AS t(stats)
+                )
+                SELECT m.result = d.result FROM merged m, direct d",
+        );
+        assert_eq!(result, Ok(Some(true)), "Merged partial aggregates must match direct aggregate");
+    }
+
+    #[pg_test]
+    fn test_parallel_combine_disjoint_keys() {
+        // Two workers with non-overlapping keys: combine must adopt both
+        let result = Spi::get_one::<pgrx::JsonB>(
+            "WITH
+                w1 AS (
+                    SELECT jsonb_stats_accum('{}'::jsonb,
+                        '{\"a\": {\"type\": \"int\", \"value\": 1}}'::jsonb) AS agg
+                ),
+                w2 AS (
+                    SELECT jsonb_stats_accum('{}'::jsonb,
+                        '{\"b\": {\"type\": \"str\", \"value\": \"hello\"}}'::jsonb) AS agg
+                ),
+                merged AS (
+                    SELECT jsonb_stats_merge_agg(agg) AS result
+                    FROM (SELECT agg FROM w1 UNION ALL SELECT agg FROM w2) t
+                )
+                SELECT result FROM merged",
+        );
+        let val = result.unwrap().unwrap().0;
+        assert_eq!(val["type"], "stats_agg");
+        assert_eq!(val["a"]["type"], "int_agg");
+        assert_eq!(val["a"]["count"], 1);
+        assert_eq!(val["b"]["type"], "str_agg");
+        assert_eq!(val["b"]["counts"]["hello"], 1);
+    }
+
+    #[pg_test]
+    fn test_parallel_force_parallel_query() {
+        Spi::run(
+            "CREATE TEMP TABLE parallel_test_data AS
+             SELECT jsonb_build_object(
+                 'x', jsonb_build_object('type', 'int', 'value', i)
+             ) AS stats
+             FROM generate_series(1, 10000) AS i",
+        ).unwrap();
+
+        // Force parallel execution (PG 16+ uses debug_parallel_query)
+        Spi::run(
+            "SET parallel_setup_cost = 0;
+             SET parallel_tuple_cost = 0;
+             SET min_parallel_table_scan_size = 0;
+             SET max_parallel_workers_per_gather = 4;
+             SET debug_parallel_query = regress",
+        ).unwrap();
+
+        let result = Spi::get_one::<pgrx::JsonB>(
+            "SELECT jsonb_stats_agg(stats) FROM parallel_test_data",
+        );
+        let val = result.unwrap().unwrap().0;
+        assert_eq!(val["x"]["count"], 10000);
+        // sum of 1..10000 = 50005000
+        assert_eq!(val["x"]["sum"], 50005000);
+    }
+
+    // ── Group E: Numeric edge cases ──
+
+    #[pg_test]
+    fn test_agg_single_row_zero_value() {
+        let result = Spi::get_one::<pgrx::JsonB>(
+            "WITH data(stats) AS (
+                VALUES ('{\"x\": {\"type\": \"int\", \"value\": 0}}'::jsonb)
+            )
+            SELECT jsonb_stats_agg(stats) FROM data",
+        );
+        let val = result.unwrap().unwrap().0;
+        assert_eq!(val["x"]["count"], 1);
+        assert!(val["x"]["variance"].is_null());
+        assert!(val["x"]["stddev"].is_null());
+        assert!(val["x"]["coefficient_of_variation_pct"].is_null());
+    }
+
+    #[pg_test]
+    fn test_agg_identical_zeros() {
+        // Two rows of 0.0: cv = NaN (0/0) → caught by is_finite() guard → NULL
+        let result = Spi::get_one::<pgrx::JsonB>(
+            "WITH data(stats) AS (
+                VALUES
+                    ('{\"x\": {\"type\": \"float\", \"value\": 0}}'::jsonb),
+                    ('{\"x\": {\"type\": \"float\", \"value\": 0}}'::jsonb)
+            )
+            SELECT jsonb_stats_agg(stats) FROM data",
+        );
+        let val = result.unwrap().unwrap().0;
+        assert_eq!(val["x"]["variance"].to_string(), "0.00");
+        assert_eq!(val["x"]["stddev"].to_string(), "0.00");
+        assert!(val["x"]["coefficient_of_variation_pct"].is_null(),
+            "cv_pct should be NULL when mean=0 (0/0 → NaN → guarded to NULL)");
+    }
+
+    #[pg_test(error = "jsonb_stats: non-finite value in round2 (inf). Input data likely caused numeric overflow.")]
+    fn test_agg_float_overflow_errors() {
+        // Construct Internal state with Inf sum_sq_diff (simulates overflow from extreme values)
+        use crate::state::{AggEntry, NumFields, StatsState};
+
+        let mut state = StatsState::default();
+        state.entries.insert("x".to_string(), AggEntry::FloatAgg(NumFields {
+            count: 2,
+            sum: 0.0,
+            min: -1e154,
+            max: 1e154,
+            mean: 0.0,
+            sum_sq_diff: f64::INFINITY,
+        }));
+
+        let ptr = Box::into_raw(Box::new(state));
+        let internal = pgrx::Internal::from(Some(pgrx::pg_sys::Datum::from(ptr as usize)));
+        unsafe { crate::jsonb_stats_final_internal(internal) };
+    }
+
+    // ── Group F: Stress test ──
+
+    #[pg_test]
+    fn test_stress_100k_rows_all_types() {
+        Spi::run(
+            "CREATE TEMP TABLE stress_data AS
+             SELECT jsonb_build_object(
+                 'i', jsonb_build_object('type', 'int', 'value', i),
+                 'f', jsonb_build_object('type', 'float', 'value', i * 0.1),
+                 'd', jsonb_build_object('type', 'dec2', 'value', (i % 100) * 0.01),
+                 'n', jsonb_build_object('type', 'nat', 'value', abs(i)),
+                 's', jsonb_build_object('type', 'str', 'value', 'v' || (i % 10)::text),
+                 'b', jsonb_build_object('type', 'bool', 'value', i % 2 = 0),
+                 'a', jsonb_build_object('type', 'arr', 'value', jsonb_build_array('x', 'y')),
+                 'dt', jsonb_build_object('type', 'date', 'value', '2024-01-' || lpad((i % 28 + 1)::text, 2, '0'))
+             ) AS stats
+             FROM generate_series(1, 100000) AS i",
+        ).unwrap();
+
+        let result = Spi::get_one::<pgrx::JsonB>(
+            "SELECT jsonb_stats_agg(stats) FROM stress_data",
+        );
+        let val = result.unwrap().unwrap().0;
+        assert_eq!(val["type"], "stats_agg");
+        assert_eq!(val["i"]["count"], 100000);
+        assert_eq!(val["f"]["type"], "float_agg");
+        assert_eq!(val["d"]["type"], "dec2_agg");
+        assert_eq!(val["n"]["type"], "nat_agg");
+        assert_eq!(val["s"]["type"], "str_agg");
+        assert_eq!(val["b"]["type"], "bool_agg");
+        assert_eq!(val["a"]["type"], "arr_agg");
+        assert_eq!(val["dt"]["type"], "date_agg");
+    }
+
+    // ── Group G: Error paths (silent-skip → error) ──
+
+    #[pg_test(error = "jsonb_stats: stat of type 'str' has missing or invalid 'value'")]
+    fn test_accum_str_update_rejects_missing_value() {
+        let state = crate::jsonb_stats_accum(
+            pgrx::JsonB(serde_json::json!({})),
+            pgrx::JsonB(serde_json::json!({"x": {"type": "str", "value": "hello"}})),
+        );
+        crate::jsonb_stats_accum(
+            state,
+            pgrx::JsonB(serde_json::json!({"x": {"type": "str"}})),
+        );
+    }
+
+    #[pg_test(error = "jsonb_stats: date stat requires a string 'value'")]
+    fn test_accum_date_update_rejects_missing_value() {
+        let state = crate::jsonb_stats_accum(
+            pgrx::JsonB(serde_json::json!({})),
+            pgrx::JsonB(serde_json::json!({"x": {"type": "date", "value": "2024-01-15"}})),
+        );
+        crate::jsonb_stats_accum(
+            state,
+            pgrx::JsonB(serde_json::json!({"x": {"type": "date"}})),
+        );
+    }
+
     // ── Benchmarks: Rust vs PL/pgSQL ──
     //
     // pgrx tests run inside the PostgreSQL server process, so eprintln/warning
