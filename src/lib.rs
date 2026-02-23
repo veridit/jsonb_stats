@@ -26,6 +26,7 @@ CREATE AGGREGATE jsonb_stats_agg(jsonb) (
     sfunc = jsonb_stats_accum_sfunc,
     stype = internal,
     finalfunc = jsonb_stats_final_internal,
+    finalfunc_modify = read_write,
     combinefunc = jsonb_stats_combine,
     serialfunc = jsonb_stats_serial,
     deserialfunc = jsonb_stats_deserial,
@@ -37,6 +38,7 @@ CREATE AGGREGATE jsonb_stats_merge_agg(jsonb) (
     sfunc = jsonb_stats_merge_sfunc,
     stype = internal,
     finalfunc = jsonb_stats_final_internal,
+    finalfunc_modify = read_write,
     combinefunc = jsonb_stats_combine,
     serialfunc = jsonb_stats_serial,
     deserialfunc = jsonb_stats_deserial,
@@ -1191,6 +1193,47 @@ mod tests {
             state,
             pgrx::JsonB(serde_json::json!({"x": {"type": "date"}})),
         );
+    }
+
+    // ── Reproduction: RETURN QUERY + LATERAL + aggregate segfault ──
+
+    #[pg_test]
+    fn test_return_query_lateral_agg() {
+        // Reproduces the segfault from crash-diagnosis.md:
+        // jsonb_stats_merge_agg result passed through PL/pgSQL RETURN QUERY
+        // with a LATERAL JOIN causes use-after-free (signal 11).
+        Spi::run(
+            "CREATE TEMP TABLE repro_data (grp int, stats jsonb);
+             INSERT INTO repro_data
+             SELECT i % 10, jsonb_build_object(
+                 'x', jsonb_build_object('type', 'int', 'value', i),
+                 's', jsonb_build_object('type', 'str', 'value', 'v' || (i % 5)::text)
+             )
+             FROM generate_series(1, 1000) AS i",
+        ).unwrap();
+
+        // PL/pgSQL function using RETURN QUERY + LATERAL + aggregate
+        Spi::run(
+            "CREATE OR REPLACE FUNCTION repro_return_query()
+             RETURNS TABLE (grp int, stats_summary jsonb) AS $$
+             BEGIN
+                 RETURN QUERY
+                 SELECT d.grp, s.stats_summary
+                 FROM (SELECT DISTINCT rd.grp FROM repro_data rd) d
+                 LEFT JOIN LATERAL (
+                     SELECT jsonb_stats_agg(r.stats) AS stats_summary
+                     FROM repro_data r
+                     WHERE r.grp = d.grp
+                 ) s ON true;
+             END;
+             $$ LANGUAGE plpgsql",
+        ).unwrap();
+
+        // This crashes without the memory context fix
+        let result = Spi::get_one::<i64>(
+            "SELECT count(*) FROM repro_return_query()",
+        );
+        assert_eq!(result, Ok(Some(10)), "Should return 10 groups without crashing");
     }
 
     // ── Benchmarks: Rust vs PL/pgSQL ──
