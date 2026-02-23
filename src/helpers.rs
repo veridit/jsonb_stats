@@ -43,8 +43,15 @@ pub fn num_value(v: f64) -> Value {
 /// Round f64 to 2 decimal places, preserving exact representation via arbitrary_precision.
 /// E.g. round2(100.0) produces the JSON number 100.00 (not 100 or 100.0).
 pub fn round2(v: f64) -> Value {
+    if !v.is_finite() {
+        pgrx::error!(
+            "jsonb_stats: non-finite value in round2 ({}). Input data likely caused numeric overflow.",
+            v
+        );
+    }
     // format!("{:.2}", v) always produces exactly 2 decimal places
-    serde_json::from_str(&format!("{:.2}", v)).unwrap()
+    serde_json::from_str(&format!("{:.2}", v))
+        .unwrap_or_else(|e| pgrx::error!("jsonb_stats: round2 failed for {}: {}", v, e))
 }
 
 /// Extract a string from a JSON object by key.

@@ -52,7 +52,9 @@ pub unsafe fn jsonb_stats_combine(state1: Internal, state2: Internal) -> Interna
 pub unsafe fn jsonb_stats_serial(internal: Internal) -> Vec<u8> {
     let ptr: *mut StatsState = match internal.unwrap() {
         Some(datum) => datum.cast_mut_ptr::<StatsState>(),
-        None => return serde_json::to_vec(&StatsState::default()).unwrap(),
+        None => return serde_json::to_vec(&StatsState::default()).unwrap_or_else(|e| {
+            pgrx::error!("jsonb_stats: serialization of empty state failed: {}", e)
+        }),
     };
     let state = unsafe { &*ptr };
     serde_json::to_vec(state).unwrap_or_else(|e| {
