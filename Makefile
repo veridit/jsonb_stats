@@ -6,10 +6,13 @@ export BINDGEN_EXTRA_CLANG_ARGS
 
 PG_VERSION ?= pg18
 
-.PHONY: test run install package
+.PHONY: test test-crash run install package
 
 test:
 	cargo pgrx test $(PG_VERSION)
+
+test-crash: install
+	psql -d postgres -f dev/test-crash.sql
 
 run:
 	cargo pgrx run $(PG_VERSION)
