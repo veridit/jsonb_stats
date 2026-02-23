@@ -1,5 +1,5 @@
 use pgrx::prelude::*;
-use pgrx::{pg_sys, Internal, JsonB};
+use pgrx::{Internal, JsonB};
 use serde_json::{json, Map, Number, Value};
 
 use crate::helpers::*;
@@ -96,21 +96,20 @@ fn finalize_num_agg(mut obj: Map<String, Value>) -> Value {
 
 #[pg_extern(immutable, parallel_safe)]
 pub unsafe fn jsonb_stats_final_internal(internal: Internal) -> JsonB {
-    // Switch to CurTransactionContext so the JsonB datum (palloc'd by into_datum →
-    // jsonb_in) survives per-tuple context resets in complex query plans
-    // (e.g. RETURN QUERY + JOINs).  We intentionally do NOT switch back — the
-    // pgrx-generated wrapper calls into_datum() after our body returns.
-    unsafe {
-        pg_sys::MemoryContextSwitchTo(pg_sys::CurTransactionContext);
-    }
-
     let state_ptr: *mut StatsState = match internal.unwrap() {
         Some(datum) => datum.cast_mut_ptr::<StatsState>(),
         None => return JsonB(json!({"type": "stats_agg"})),
     };
 
-    // Take ownership so the state is properly freed when this scope ends
-    let state = unsafe { Box::from_raw(state_ptr) };
+    // Borrow the state WITHOUT taking ownership. CTE inlining can cause the
+    // planner to rescan the aggregate, calling the finalfunc multiple times on
+    // the same Internal state. Box::from_raw would free the state on the first
+    // call, making subsequent calls use-after-free → SIGSEGV.
+    //
+    // The state (Rust heap via Box::into_raw in sfunc) is freed by
+    // jsonb_stats_combine's Box::from_raw on state2, or leaked until the
+    // aggregate memory context is reset at end-of-query.
+    let state = unsafe { &*state_ptr };
 
     let mut result = Map::new();
     result.insert("type".to_string(), json!("stats_agg"));
