@@ -6,7 +6,7 @@
 
 The extension is built on two core principles that enable powerful, hierarchical analytics:
 
-1.  **Mergeable Summaries**: The statistical summaries (`stats_agg`) are designed to be efficiently combined. This is achieved by using online algorithms for calculating metrics like mean and variance (e.g., Welford's method). This feature is critical for building multi-level reports, such as aggregating daily data into monthly summaries, or regional data into a global summary, without reprocessing the raw data. This allows for the creation of faceted histories (`history_facet`) that can be drilled down into or rolled up.
+1.  **Mergeable Summaries**: The statistical summaries (`stats_agg`) are designed to be efficiently combined. Numeric summaries keep an exact state (`count`, `sum`, `sum_sq`, `min`, `max`) that is combined by plain addition, so merging is lossless: the same rows give byte-identical output regardless of row order, grouping, merge order, parallel plan or CPU architecture. This is critical for building multi-level reports, such as aggregating daily data into monthly summaries, or regional data into a global summary, without reprocessing the raw data. This allows for the creation of faceted histories (`history_facet`) that can be drilled down into or rolled up.
 
 2.  **Normalized Change Detection**: All numeric summaries (`int_agg`, `float_agg`, `dec2_agg`, `nat_agg`) include the `coefficient_of_variation_pct`. This metric provides a standardized, unit-less measure of variability relative to the mean. It allows data analysts to quickly identify significant changes or volatility in a statistic, regardless of the actual scale of the underlying numbers, making it easier to pinpoint areas of interest in large datasets.
 
@@ -32,13 +32,14 @@ The extension revolves around three hierarchical JSONB structures:
     {
         "type": "stats_agg",
         "num_employees": {
-            "coefficient_of_variation_pct": 154.16,
+            "coefficient_of_variation_pct": 154.06,
             "count": 3,
             "max": 2500,
             "mean": 900.00,
             "min": 50,
-            "stddev": 1387.44,
+            "stddev": 1386.54,
             "sum": 2700,
+            "sum_sq": 6275000,
             "sum_sq_diff": 3845000.00,
             "type": "int_agg",
             "variance": 1922500.00
@@ -182,6 +183,7 @@ GROUP BY luh.valid_from, luh.valid_until, luh.region;
 --         "type": "float_agg",
 --         "count": 1,
 --         "stddev": null,
+--         "sum_sq": 15241576527.9684,
 --         "variance": null,
 --         "sum_sq_diff": 0.00,
 --         "coefficient_of_variation_pct": null
@@ -201,6 +203,7 @@ GROUP BY luh.valid_from, luh.valid_until, luh.region;
 --         "min": 50,
 --         "stddev": 70.71,
 --         "sum": 200,
+--         "sum_sq": 25000,
 --         "sum_sq_diff": 5000.00,
 --         "type": "int_agg",
 --         "variance": 5000.00
@@ -250,22 +253,25 @@ jsonb_stats_merge(stats_agg, (SELECT jsonb_stats_agg(s) FROM (VALUES (new_compan
 The `stats_agg` object contains different summary structures depending on the data type being aggregated. The logic for these summaries is documented in `dev/reference_plpgsql.sql`.
 
 #### Numeric Summaries (`int_agg`, `float_agg`, `dec2_agg`, `nat_agg`)
-Aggregates numeric values, providing a trade-off between performance and precision. All calculated fields are stored as JSON `number`s.
+All four numeric summaries are **exact**. Values are accumulated as exact decimals (arbitrary precision), never as binary floating point, so there is no rounding drift, no overflow, and no dependence on order, grouping, parallelism or CPU. All fields are JSON `number`s.
 
--   **`int_agg`**: For `bigint` values. Uses fast `int64` arithmetic.
--   **`float_agg`**: For `float8` values. Uses fast `double` arithmetic.
--   **`dec2_agg`**: For values with two decimal places. Uses fast, scaled `int64` arithmetic internally to guarantee precision while representing values as standard JSON `number`s in the output.
--   **`nat_agg`**: For natural numbers (non-negative integers). Same Welford accumulation as `int_agg`, but validates that values are >= 0. Negative values are silently skipped. Created manually via `jsonb_build_object('type','nat','value',42)` (no PG OID maps to it automatically).
+-   **`int_agg`**: For integer values (`smallint`, `integer`, `bigint`). Values must be integral.
+-   **`float_agg`**: For `real` / `float8` values. A `float` stat carries the shortest decimal text that round-trips the float (e.g. `0.1`), and that decimal is aggregated exactly, so `0.1 + 0.2` sums to `0.3`.
+-   **`dec2_agg`**: For values with at most two decimal places (`numeric`; `stat()` rounds to 2 decimals). `sum`, `min` and `max` are printed with exactly 2 decimals and `sum_sq` with 4.
+-   **`nat_agg`**: For natural numbers (non-negative integers). Same as `int_agg`, but a negative value raises an error. Created manually via `jsonb_build_object('type','nat','value',42)` (no PG OID maps to it automatically).
 
-All numeric summaries share the following fields:
+All numeric summaries share the following fields. The first five are the exact, mergeable **state**; the rest are **derived** from it and recomputed on every merge (derived fields in input are ignored).
 - `count`: Number of values.
-- `sum`: The sum of all values.
+- `sum`: The exact sum of all values.
+- `sum_sq`: The exact sum of the squares of all values (new in 3.0; required for merging).
 - `min`/`max`: The minimum and maximum values.
-- `mean`: The arithmetic mean, updated iteratively. ([Calculation Reference](https://en.wikipedia.org/wiki/Algorithms_for_calculating_variance#Online_algorithm))
-- `sum_sq_diff`: The sum of squared differences from the mean, calculated using [Welford's online algorithm](https://en.wikipedia.org/wiki/Algorithms_for_calculating_variance#Welford's_online_algorithm) to ensure numerical stability and mergeability.
-- `variance`: The sample variance.
-- `stddev`: The sample standard deviation.
-- `coefficient_of_variation_pct`: The coefficient of variation (CV), expressed as a percentage (`stddev / mean * 100`). This provides a standardized measure of dispersion.
+- `mean`: `sum / count`.
+- `sum_sq_diff`: The sum of squared differences from the mean, `sum_sq - sum²/count`.
+- `variance`: The sample variance, `sum_sq_diff / (count - 1)`. `null` when `count <= 1`.
+- `stddev`: The sample standard deviation, `sqrt(variance)`. `null` when `count <= 1`.
+- `coefficient_of_variation_pct`: The coefficient of variation (CV), expressed as a percentage (`stddev / mean * 100`). This provides a standardized measure of dispersion. `null` when `count <= 1` or `mean = 0`.
+
+Every derived field is computed exactly from the state and rounded once to 2 decimals, half away from zero (like PostgreSQL `round(x, 2)`); `stddev` and `coefficient_of_variation_pct` are correctly rounded square roots.
 
 **Example:**
 Given three `stats` objects:
@@ -286,6 +292,7 @@ The resulting `int_agg` would be:
         "sum_sq_diff": 116.67,
         "variance": 58.33,
         "stddev": 7.64,
+        "sum_sq": 525,
         "coefficient_of_variation_pct": 65.47
     }
 }
@@ -393,10 +400,12 @@ The Rust implementation (via pgrx) uses native `HashMap` state with `Box` heap a
 
 | Benchmark | Rust | PL/pgSQL | Speedup |
 |-----------|------|----------|---------|
-| `jsonb_stats_agg` — 10K rows, 3 types | 27ms | 14,015ms | **515x** |
-| `jsonb_stats_merge_agg` — 1K groups | 108ms | 797,240ms | **7,380x** |
+| `jsonb_stats_agg` — 10K rows, 3 types | 33–45ms | 16,701–17,855ms | **393–511x** |
+| `jsonb_stats_merge_agg` — 1K groups | 110–120ms | 1,090,917–1,110,045ms | **9,098–10,116x** |
 
-The merge speedup is larger because PL/pgSQL performs full JSONB serialization round-trips per group, while Rust merges native structs and only serializes once in the finalfunc.
+(Apple M-series, PostgreSQL 18, jsonb_stats 3.0, two full suite runs; the 10K-row timing is noisy at this size.) The merge speedup is larger because PL/pgSQL performs full JSONB serialization round-trips per group, while Rust merges native structs and only serializes once in the finalfunc.
+
+Exact arithmetic costs little: per 100K rows, `int` and `str` accumulate as fast as the earlier f64 implementation, and `float` (16-17 significant digits per value) takes about 25% longer.
 
 ### Parallel aggregation
 
@@ -422,7 +431,7 @@ Benchmarks run as part of the test suite (`cargo pgrx test`). Results are writte
 
 A key design feature of `jsonb_stats` is its use of a `stat` object (`{"type": "int", "value": 10}`). This structure is used to explicitly preserve the original SQL data type of a value (`bigint`, `float8`, `numeric(x,2)`, etc.) before it is aggregated.
 
-While this adds a level of nesting compared to working with raw `jsonb` values, it is a deliberate choice to enable performance and correctness. By capturing the intended type in a `stat` object, `jsonb_stats` can use the most performant internal representation (e.g., `int64` for `int`, scaled integers for `decimal2`) to perform fast and accurate calculations. This avoids the performance overhead and precision issues associated with PostgreSQL's generic `numeric` type inside a high-volume aggregation loop.
+While this adds a level of nesting compared to working with raw `jsonb` values, it is a deliberate choice to enable correctness: the stat type decides how a value is validated and scaled (integral for `int`/`nat`, two decimals for `dec2`), and every numeric type is aggregated exactly, so summaries can be stored, merged and re-merged without ever drifting.
 
 ## API
 
@@ -440,23 +449,24 @@ While this adds a level of nesting compared to working with raw `jsonb` values, 
 
 | PostgreSQL type | Stat type | Aggregate type |
 |-----------------|-----------|----------------|
-| `integer` | `int` | `int_agg` |
-| `float8` | `float` | `float_agg` |
-| `numeric` | `dec2` | `dec2_agg` |
+| `smallint` / `integer` / `bigint` | `int` | `int_agg` |
+| `real` / `float8` | `float` | `float_agg` |
+| `numeric` (rounded to 2 decimals) | `dec2` | `dec2_agg` |
 | `date` | `date` | `date_agg` |
 | `text` / `varchar` | `str` | `str_agg` |
 | `boolean` | `bool` | `bool_agg` |
-| `array` | `arr` | `arr_agg` |
+| any array | `arr` | `arr_agg` |
 | _(manual)_ | `nat` | `nat_agg` |
+| anything else | `str` (text output) | `str_agg` |
 
-`nat` has no automatic mapping — create manually: `jsonb_build_object('type','nat','value',42)`.
+`nat` has no automatic mapping — create manually: `jsonb_build_object('type','nat','value',42)`. `NaN` and `±Infinity` are rejected with an error.
 
 ### Aggregate Functions
 
 | Function | Description |
 |----------|-------------|
 | `jsonb_stats_agg(code text, stat jsonb)` | Pairs → `stats` (convenience for building stats row by row) |
-| `jsonb_stats_agg(stats jsonb)` | `stats` → `stats_agg` (accumulate + finalize with Welford statistics). NULL inputs are silently skipped. |
+| `jsonb_stats_agg(stats jsonb)` | `stats` → `stats_agg` (accumulate + finalize). NULL inputs are silently skipped. |
 | `jsonb_stats_merge_agg(stats_agg jsonb)` | `stats_agg` → `stats_agg` (parallel merge of pre-aggregated summaries). NULL inputs are silently skipped. |
 
 ### Scalar Functions
@@ -464,19 +474,36 @@ While this adds a level of nesting compared to working with raw `jsonb` values, 
 | Function | Description |
 |----------|-------------|
 | `jsonb_stats_to_agg(stats jsonb)` | Convert a single `stats` → `stats_agg` (for merging with existing aggregates) |
-| `jsonb_stats_merge(a jsonb, b jsonb)` | Binary merge of two `stats_agg` objects (no aggregate context needed) |
-| `jsonb_stats_accum(state jsonb, stats jsonb)` | Low-level: accumulate one `stats` into running state |
-| `jsonb_stats_final(state jsonb)` | Low-level: compute derived stats (variance, stddev, cv_pct) on accumulated state |
+| `jsonb_stats_merge(a jsonb, b jsonb)` | Binary merge of two `stats_agg` objects (no aggregate context needed). Returns a finalized `stats_agg`, safe to store and merge again |
+| `jsonb_stats_accum(state jsonb, stats jsonb)` | Low-level: accumulate one `stats` into running state (numeric entries carry only `count`, `sum`, `sum_sq`, `min`, `max`) |
+| `jsonb_stats_final(state jsonb)` | Low-level: compute derived stats (mean, sum_sq_diff, variance, stddev, cv_pct) on accumulated state |
 
 ### Error Handling
 
 The extension follows a **fail-fast** strategy. Invalid input raises a PostgreSQL `ERROR` (aborting the transaction) rather than silently producing wrong results:
 
 - **Unknown stat type** (e.g., `"type":"foo"`) → `ERROR: unknown stat type 'foo'`
-- **Missing or invalid value** (e.g., str stat with no `"value"` key) → `ERROR: missing or invalid 'value'`
+- **Missing or invalid value** (e.g., str stat with no `"value"` key, or a numeric stat whose value is not a JSON number) → `ERROR: missing or invalid 'value'` / `missing or non-numeric 'value'`
+- **Non-integral int/nat value** (e.g., `1.5`) → `ERROR: int value must be an integer`
 - **Negative nat value** → `ERROR: nat value must be >= 0`
-- **Type mismatch in merge** (e.g., merging `int_agg` with `str_agg` for the same key) → `ERROR: type mismatch`
+- **dec2 value with more than 2 decimals** → `ERROR: dec2 value must have at most 2 decimal places`
+- **Type mismatch** (e.g., a key that is `int` in one row and `float` in another, or merging `int_agg` with `str_agg`) → `ERROR: type mismatch for key '...'`
 - **Unknown aggregate type** → `ERROR: unknown aggregate type`
+- **Numeric summary without `sum_sq`** (written by jsonb_stats < 3.0) → `ERROR: ... lacks 'sum_sq' (created by jsonb_stats < 3.0). Recompute it from the source stats.`
+- **Malformed numeric summary** (`count` not an integer >= 1, non-numeric state field, `count * sum_sq < sum²`) → `ERROR`
+- **`stat()` of NaN or ±Infinity** → `ERROR: stat() cannot represent non-finite value`
+
+## Upgrading from 2.x
+
+Version 3.0 changes the numeric summary format, so stored `stats_agg` values must be recomputed. There is no `ALTER EXTENSION ... UPDATE` script: drop and re-create the extension (`DROP EXTENSION jsonb_stats CASCADE; CREATE EXTENSION jsonb_stats;`), then rebuild dependent objects and stored aggregates.
+
+- Numeric `*_agg` objects gain a required `sum_sq` field. Summaries written by 2.x lack it and are rejected by every merge/final function, because the exact state cannot be recovered from them. Recompute stored aggregates from their source `stats` (e.g. refresh the materialized views that hold them).
+- Results become exact, so stored statistics change in their last digits: `sum_sq_diff`, `variance`, `stddev`, `coefficient_of_variation_pct` (and `mean` where 2.x merges used the rounded mean). `float_agg` sums are now decimal-exact (`0.1 + 0.2 = 0.3`).
+- `dec2_agg` prints `sum`/`min`/`max` with 2 decimals and `sum_sq` with 4.
+- `jsonb_stats_merge` now returns a finalized `stats_agg` (with `"type": "stats_agg"` and all derived fields). `jsonb_stats_accum` returns only exact state fields for numeric keys.
+- `stat()` now maps `smallint`/`bigint` to `int`, `real` to `float`, arrays to `arr`, and rounds `numeric` to 2 decimals.
+- Previously silent problems now raise errors: non-integral `int`/`nat` values, `dec2` values with more than 2 decimals, non-numeric numeric values, and a key changing stat type between rows.
+- The type-mismatch error message changed to `type mismatch for key '<key>': existing <a> vs incoming <b>`.
 
 ## Installation
 

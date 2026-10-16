@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-`jsonb_stats` is a PostgreSQL extension for statistical aggregation using JSONB. It provides hierarchical analytics on dynamically-created variables without schema modifications, using online algorithms (Welford's method) for mergeable summaries and coefficient of variation for normalized change detection.
+`jsonb_stats` is a PostgreSQL extension for statistical aggregation using JSONB. It provides hierarchical analytics on dynamically-created variables without schema modifications, using exact, mergeable numeric summaries (count, sum, sum_sq, min, max as arbitrary-precision decimals) and coefficient of variation for normalized change detection. Output must be byte-identical for any row order, grouping, merge order, parallel plan or CPU.
 
 The PL/pgSQL reference (`dev/reference_plpgsql.sql`) is the authoritative spec — every Rust function must produce identical output, then be faster.
 
@@ -13,7 +13,8 @@ The PL/pgSQL reference (`dev/reference_plpgsql.sql`) is the authoritative spec �
 The Makefile handles the pgrx environment variables (macOS SDK path workaround):
 
 ```bash
-make test        # Run all tests (47 tests: correctness + error handling + benchmarks)
+make test        # Run all tests (pg_tests: correctness + exactness + error handling + benchmarks; plus unit tests)
+make test PG_VERSION="pg18 test_exact"   # Only the exactness/determinism suite (fast)
 make run         # Launch psql with extension loaded
 make install     # Install into system PostgreSQL
 make package     # Build installable package
@@ -26,12 +27,14 @@ Benchmark results are written to `/tmp/jsonb_stats_benchmarks.txt` after each te
 - `dev/reference_plpgsql.sql` — **The authoritative spec.** Every Rust function must match its PL/pgSQL counterpart.
 - `src/lib.rs` — pg_module_magic, module declarations, extension_sql for aggregates, tests
 - `src/stat.rs` — stat(), stats(), jsonb_stats_sfunc
+- `src/state.rs` — StatsState/AggEntry/NumFields: all accumulate, merge, parse and summary logic (one implementation for every path)
+- `src/exact.rs` — Decimal: exact arbitrary-precision decimal arithmetic, exact rounding and square roots
 - `src/accum.rs` — jsonb_stats_accum + jsonb_stats_accum_sfunc (Internal state)
 - `src/merge.rs` — jsonb_stats_merge + jsonb_stats_merge_sfunc (Internal state)
 - `src/parallel.rs` — jsonb_stats_combine, jsonb_stats_serial, jsonb_stats_deserial (parallel aggregation)
 - `src/final_fn.rs` — jsonb_stats_final + jsonb_stats_final_internal
-- `src/state.rs` — StatsState/AggEntry native Rust types for Internal aggregate state
-- `src/helpers.rs` — get_f64, get_i64, get_str, num_value, round2
+- `src/tests_exact.rs` — exactness/determinism pg_tests (included into `mod tests`)
+- `dev/exact_oracle.py` — independent Python rational-arithmetic oracle; generates `dev/fixtures/exact_fixture.sql` (`python3 dev/exact_oracle.py > dev/fixtures/exact_fixture.sql`)
 
 ## Coding Standards
 
@@ -55,8 +58,10 @@ Benchmark results are written to `/tmp/jsonb_stats_benchmarks.txt` after each te
 
 The PL/pgSQL reference implementation (`dev/reference_plpgsql.sql`) is dual-purpose:
 
-1. **Correctness spec**: Every Rust function must produce **identical output** to its PL/pgSQL counterpart for all inputs.
+1. **Correctness spec**: Every Rust function must produce **identical output** to its PL/pgSQL counterpart for all inputs. Compare `::text`, not jsonb equality, so number scale is part of the contract.
 2. **Performance baseline**: Rust must **beat** PL/pgSQL on benchmarks.
+
+Numeric results are additionally checked against `dev/exact_oracle.py`, which is independent of both implementations. Never use f64 for numeric aggregate state or derived values.
 
 ## Development Workflow
 

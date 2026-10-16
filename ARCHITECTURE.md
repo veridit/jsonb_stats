@@ -37,10 +37,10 @@ This forms a fully self-describing discriminated union at every level — the `t
 
 | stat type | agg type | Internal repr | Description |
 |-----------|----------|---------------|-------------|
-| `int` | `int_agg` | i64 | Integer values (bigint) |
-| `float` | `float_agg` | f64 | Floating-point values (float8) |
-| `dec2` | `dec2_agg` | scaled i64 | Fixed two-decimal (numeric). Scaled ×100 internally for exact arithmetic |
-| `nat` | `nat_agg` | i64 | Natural numbers (non-negative integers). Validated >= 0 |
+| `int` | `int_agg` | exact decimal, scale 0 | Integer values. Must be integral |
+| `float` | `float_agg` | exact decimal | Float values, taken as the exact decimal their shortest round-trip text denotes |
+| `dec2` | `dec2_agg` | exact decimal, scale 2 | Fixed two-decimal values. At most 2 decimals |
+| `nat` | `nat_agg` | exact decimal, scale 0 | Natural numbers (non-negative integers). Validated >= 0 |
 | `str` | `str_agg` | count map | String values → frequency counts |
 | `bool` | `bool_agg` | count map | Boolean values → frequency counts |
 | `date` | `date_agg` | count map + min/max | Date values → frequency counts with min/max tracking |
@@ -58,37 +58,38 @@ The pipeline uses two different state strategies:
 
 **Internal state (native HashMap)** — Used by `jsonb_stats_accum_sfunc`, `jsonb_stats_merge_sfunc`, and the parallel functions (`jsonb_stats_combine`, `jsonb_stats_serial`, `jsonb_stats_deserial`). State is a Rust `StatsState` struct allocated on the Rust heap (`Box::new`). This avoids JSONB serialization per row — the critical optimization that makes Rust ~500x faster than PL/pgSQL for accumulation.
 
-**JSONB state** — Used by the scalar `jsonb_stats_merge` function. Parses JSONB via serde_json, merges, serializes back. This is fine because merge is called O(groups) not O(rows).
+**JSONB state** — Used by the scalar functions (`jsonb_stats_accum`, `jsonb_stats_merge`, `jsonb_stats_final`). They parse JSONB into the same `StatsState`, apply the same operations, and serialize back. This is fine because they are called O(groups) not O(rows).
 
-The `jsonb_stats_final_internal` finalfunc converts the Internal `StatsState` to a JSONB `stats_agg`, computing derived statistics (variance, stddev, coefficient of variation) in the process.
+All paths share one implementation in `src/state.rs`: `StatsState::accumulate`, `StatsState::merge_summaries`, `AggEntry::merge` / `NumFields::merge` (the single combine), and `NumFields::summary_json` (the single summary builder).
 
-## Welford's Online Algorithm
+The `jsonb_stats_final_internal` finalfunc converts the Internal `StatsState` to a JSONB `stats_agg`, computing derived statistics (mean, sum_sq_diff, variance, stddev, coefficient of variation) in the process.
 
-All numeric types (`int_agg`, `float_agg`, `dec2_agg`, `nat_agg`) use Welford's method for numerically stable statistics:
+## Exact Numeric State
 
-**Single-value update** (accumulate):
+All numeric types (`int_agg`, `float_agg`, `dec2_agg`, `nat_agg`) keep an exact state of arbitrary-precision decimals (`src/exact.rs`: `BigInt` mantissa + decimal scale):
+
 ```
-count += 1
-delta = value - mean
-mean += delta / count
-delta2 = value - mean
-sum_sq_diff += delta * delta2
+count, sum = Σx, sum_sq = Σx², min, max
 ```
 
-**Parallel merge** (combine two partial aggregates):
-```
-combined_count = a.count + b.count
-delta = b.mean - a.mean
-combined_mean = a.mean + delta * (b.count / combined_count)
-combined_sum_sq_diff = a.sum_sq_diff + b.sum_sq_diff + delta² * a.count * b.count / combined_count
-```
+**Accumulate** one value: `count += 1; sum += x; sum_sq += x²; min/max`.
 
-**Derived stats** (finalfunc, computed once at the end):
-- `variance = sum_sq_diff / (count - 1)` — sample variance (NULL if count <= 1)
-- `stddev = sqrt(variance)`
-- `coefficient_of_variation_pct = (stddev / mean) * 100` — normalized dispersion (NULL if mean = 0)
+**Merge** two states: add `count`, `sum`, `sum_sq`; take `min`/`max`.
 
-All derived numeric fields are rounded to 2 decimal places.
+Both operations are exact additions, so they are associative and commutative: the state, and therefore the output, is identical for every row order, grouping, merge order, parallel plan and CPU. (The 2.x implementation used f64 Welford/Chan updates and merged using the rounded `mean`, which made results depend on all of these; see todo.md / git history.)
+
+Min/max ties between equal values printed with different scales (e.g. `2.5` vs `2.50`) keep the larger scale, so even the printed form is order independent.
+
+**Derived stats** (finalfunc, and every function returning a `stats_agg`), with `N = count · sum_sq − sum²`:
+- `mean = sum / count`
+- `sum_sq_diff = N / count`
+- `variance = N / (count · (count − 1))` — sample variance (NULL if count <= 1)
+- `stddev = sqrt(variance)` (NULL if count <= 1)
+- `coefficient_of_variation_pct = 100 · stddev / mean` (NULL if count <= 1 or sum = 0)
+
+Each is computed from exact integers and rounded once to 2 decimals, half away from zero. Square roots use integer square roots: `round(100·sqrt(q)) = (isqrt(floor(40000·q)) + 1) div 2`, which is exact. The PL/pgSQL reference implements the same formulas in `numeric` with `div()` and a Newton `isqrt`.
+
+The parallel serialfunc encodes decimals as strings, so worker state crosses process boundaries without loss.
 
 ## Parallel Aggregation
 
@@ -109,7 +110,8 @@ Fail fast with `pgrx::error!()` — unknown types, invalid values, type mismatch
 Error messages follow the pattern: `jsonb_stats: <description>`, e.g.:
 - `jsonb_stats: unknown stat type 'foo'. Expected: int, float, dec2, nat, str, bool, arr, date`
 - `jsonb_stats: nat value must be >= 0, got -1`
-- `jsonb_stats: type mismatch in merge: 'int_agg' vs 'str_agg'`
+- `jsonb_stats: type mismatch for key 'x': existing int_agg vs incoming str_agg`
+- `jsonb_stats: int_agg for key 'x' lacks 'sum_sq' (created by jsonb_stats < 3.0). Recompute it from the source stats.`
 
 ## Performance
 
@@ -119,7 +121,7 @@ Benchmarks (Rust vs PL/pgSQL reference):
 
 | Benchmark | Rust | PL/pgSQL | Speedup |
 |-----------|------|----------|---------|
-| `jsonb_stats_agg` — 10K rows, 3 types | 27ms | 14,015ms | **515x** |
-| `jsonb_stats_merge_agg` — 1K groups | 108ms | 797,240ms | **7,380x** |
+| `jsonb_stats_agg` — 10K rows, 3 types | 33–45ms | 16,701–17,855ms | **393–511x** |
+| `jsonb_stats_merge_agg` — 1K groups | 110–120ms | 1,090,917–1,110,045ms | **9,098–10,116x** |
 
 The merge speedup is larger because PL/pgSQL performs full JSONB serialization round-trips per group, while Rust merges native structs and only serializes once in the finalfunc.
