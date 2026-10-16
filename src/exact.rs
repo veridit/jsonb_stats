@@ -33,13 +33,6 @@ fn pow10(n: u32) -> BigInt {
 }
 
 impl Decimal {
-    pub fn zero() -> Self {
-        Decimal {
-            mantissa: BigInt::zero(),
-            scale: 0,
-        }
-    }
-
     pub fn scale(&self) -> u32 {
         self.scale
     }
@@ -56,10 +49,11 @@ impl Decimal {
     /// Same value at a larger scale (exact).
     fn rescaled(&self, scale: u32) -> BigInt {
         debug_assert!(scale >= self.scale);
-        if scale == self.scale {
-            self.mantissa.clone()
-        } else {
-            &self.mantissa * pow10(scale - self.scale)
+        match scale - self.scale {
+            0 => self.mantissa.clone(),
+            // 10^19 < u64::MAX: multiply by a machine word, no BigInt power.
+            d @ 1..=19 => &self.mantissa * 10u64.pow(d),
+            d => &self.mantissa * pow10(d),
         }
     }
 
@@ -90,11 +84,23 @@ impl Decimal {
         }
     }
 
+    #[cfg(test)]
     pub fn add(&self, other: &Decimal) -> Decimal {
-        let scale = self.scale.max(other.scale);
-        Decimal {
-            mantissa: self.rescaled(scale) + other.rescaled(scale),
-            scale,
+        let mut out = self.clone();
+        out.add_assign(other);
+        out
+    }
+
+    /// In-place `self += other`; allocation-free when the scales match.
+    pub fn add_assign(&mut self, other: &Decimal) {
+        use std::ops::AddAssign;
+        match self.scale.cmp(&other.scale) {
+            Ordering::Equal => self.mantissa.add_assign(&other.mantissa),
+            Ordering::Greater => self.mantissa.add_assign(other.rescaled(self.scale)),
+            Ordering::Less => {
+                self.mantissa = self.rescaled(other.scale) + &other.mantissa;
+                self.scale = other.scale;
+            }
         }
     }
 
@@ -111,36 +117,21 @@ impl Decimal {
 
     /// Numeric comparison (scale-insensitive).
     pub fn cmp_value(&self, other: &Decimal) -> Ordering {
-        let scale = self.scale.max(other.scale);
-        self.rescaled(scale).cmp(&other.rescaled(scale))
+        match self.scale.cmp(&other.scale) {
+            Ordering::Equal => self.mantissa.cmp(&other.mantissa),
+            Ordering::Less => self.rescaled(other.scale).cmp(&other.mantissa),
+            Ordering::Greater => self.mantissa.cmp(&other.rescaled(self.scale)),
+        }
     }
 
-    /// Min/max helper: the lesser (`want_less`) or greater value. Equal values
-    /// keep the one with the larger scale, so the printed result is the same
-    /// regardless of argument order.
-    pub fn pick(self, other: Decimal, want_less: bool) -> Decimal {
-        match self.cmp_value(&other) {
-            Ordering::Equal => {
-                if self.scale >= other.scale {
-                    self
-                } else {
-                    other
-                }
-            }
-            Ordering::Less => {
-                if want_less {
-                    self
-                } else {
-                    other
-                }
-            }
-            Ordering::Greater => {
-                if want_less {
-                    other
-                } else {
-                    self
-                }
-            }
+    /// Whether `candidate` should replace `self` as the running minimum
+    /// (`want_less`) or maximum. Equal values prefer the larger scale, so the
+    /// printed result does not depend on the order values arrive in.
+    pub fn replaced_by(&self, candidate: &Decimal, want_less: bool) -> bool {
+        match candidate.cmp_value(self) {
+            Ordering::Equal => candidate.scale > self.scale,
+            Ordering::Less => want_less,
+            Ordering::Greater => !want_less,
         }
     }
 
@@ -239,8 +230,16 @@ impl FromStr for Decimal {
         {
             return Err(err());
         }
-        let digits = format!("{int_part}{frac_part}");
-        let mut mantissa = BigInt::from_str(&digits).map_err(|_| err())?;
+        // Fast path: up to 18 digits fit in an i64, no String allocation.
+        let mut mantissa = if int_part.len() + frac_part.len() <= 18 {
+            let n = int_part
+                .bytes()
+                .chain(frac_part.bytes())
+                .fold(0i64, |acc, b| acc * 10 + i64::from(b - b'0'));
+            BigInt::from(n)
+        } else {
+            BigInt::from_str(&format!("{int_part}{frac_part}")).map_err(|_| err())?
+        };
         if neg {
             mantissa = -mantissa;
         }
@@ -343,11 +342,23 @@ mod unit {
     }
 
     #[test]
-    fn pick_is_order_independent_on_ties() {
-        assert_eq!(d("2.5").pick(d("2.50"), true).to_string(), "2.50");
-        assert_eq!(d("2.50").pick(d("2.5"), true).to_string(), "2.50");
-        assert_eq!(d("1").pick(d("2"), true).to_string(), "1");
-        assert_eq!(d("1").pick(d("2"), false).to_string(), "2");
+    fn min_max_is_order_independent_on_ties() {
+        let r = |a: &str, b: &str, less| d(a).replaced_by(&d(b), less);
+        assert!(r("2.5", "2.50", true), "larger scale wins a tie (min)");
+        assert!(!r("2.50", "2.5", true), "smaller scale never wins a tie");
+        assert!(r("2.5", "2.50", false), "larger scale wins a tie (max)");
+        assert!(r("2", "1", true) && !r("1", "2", true));
+        assert!(r("1", "2", false) && !r("2", "1", false));
+        assert!(r("-1", "-1.5", true) && !r("-1.5", "-1", true));
+        // parse fast path vs slow path agree
+        assert_eq!(
+            d("123456789012345678.9").to_string(),
+            "123456789012345678.9"
+        );
+        assert_eq!(
+            d("-12345678901234567.8").to_string(),
+            "-12345678901234567.8"
+        );
     }
 
     #[test]

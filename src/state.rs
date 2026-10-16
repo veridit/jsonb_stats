@@ -109,20 +109,36 @@ impl NumFields {
         }
     }
 
+    /// Fold one value in (hot path: no intermediate NumFields).
     pub fn update(&mut self, v: Decimal) {
-        self.merge(NumFields::init(v));
+        self.count = self
+            .count
+            .checked_add(1)
+            .unwrap_or_else(|| pgrx::error!("jsonb_stats: count overflow"));
+        self.sum.add_assign(&v);
+        self.sum_sq.add_assign(&v.square());
+        if self.min.replaced_by(&v, true) {
+            self.min = v.clone();
+        }
+        if self.max.replaced_by(&v, false) {
+            self.max = v;
+        }
     }
 
-    /// The one combine operation, used by accumulate, merge and parallel combine.
+    /// The one combine operation, used by merge sfunc, scalar merge and parallel combine.
     pub fn merge(&mut self, other: NumFields) {
         self.count = self
             .count
             .checked_add(other.count)
             .unwrap_or_else(|| pgrx::error!("jsonb_stats: count overflow"));
-        self.sum = self.sum.add(&other.sum);
-        self.sum_sq = self.sum_sq.add(&other.sum_sq);
-        self.min = std::mem::replace(&mut self.min, Decimal::zero()).pick(other.min, true);
-        self.max = std::mem::replace(&mut self.max, Decimal::zero()).pick(other.max, false);
+        self.sum.add_assign(&other.sum);
+        self.sum_sq.add_assign(&other.sum_sq);
+        if self.min.replaced_by(&other.min, true) {
+            self.min = other.min;
+        }
+        if self.max.replaced_by(&other.max, false) {
+            self.max = other.max;
+        }
     }
 
     /// Parse the exact state of a numeric *_agg JSON summary. Derived fields
