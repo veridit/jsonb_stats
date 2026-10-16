@@ -3,8 +3,8 @@ use pgrx::prelude::*;
 pg_module_magic!();
 
 mod accum;
+mod exact;
 mod final_fn;
-mod helpers;
 mod merge;
 mod parallel;
 mod stat;
@@ -635,14 +635,15 @@ mod tests {
 
     #[pg_test]
     fn test_state_serde_roundtrip() {
-        use crate::state::{AggEntry, NumFields, StatsState};
+        use crate::state::{AggEntry, NumFields, NumKind, StatsState};
         use std::collections::HashMap;
 
+        let num = |kind, v: &str| AggEntry::Num(kind, NumFields::init(v.parse().unwrap()));
         let mut state = StatsState::default();
-        state.entries.insert("i".to_string(), AggEntry::IntAgg(NumFields::init(100.0)));
-        state.entries.insert("f".to_string(), AggEntry::FloatAgg(NumFields::init(3.14)));
-        state.entries.insert("d".to_string(), AggEntry::Dec2Agg(NumFields::init(99.99)));
-        state.entries.insert("n".to_string(), AggEntry::NatAgg(NumFields::init(42.0)));
+        state.entries.insert("i".to_string(), num(NumKind::Int, "100"));
+        state.entries.insert("f".to_string(), num(NumKind::Float, "3.14"));
+        state.entries.insert("d".to_string(), num(NumKind::Dec2, "99.99"));
+        state.entries.insert("n".to_string(), num(NumKind::Nat, "42"));
         state.entries.insert("s".to_string(), AggEntry::StrAgg {
             counts: HashMap::from([("tech".to_string(), 2), ("finance".to_string(), 1)]),
         });
@@ -666,6 +667,8 @@ mod tests {
         for key in state.entries.keys() {
             assert!(roundtripped.entries.contains_key(key), "missing key: {}", key);
         }
+        // Exact values survive the parallel-worker byte transport unchanged.
+        assert_eq!(roundtripped.to_stats_agg(), state.to_stats_agg());
     }
 
     // ── jsonb_stats_to_agg tests ──
@@ -838,7 +841,7 @@ mod tests {
         );
     }
 
-    #[pg_test(error = "jsonb_stats: type mismatch in merge: 'int_agg' vs 'str_agg'")]
+    #[pg_test(error = "jsonb_stats: type mismatch for key 'x': existing int_agg vs incoming str_agg")]
     fn test_merge_rejects_type_mismatch() {
         crate::jsonb_stats_merge(
             pgrx::JsonB(serde_json::json!({"x": {"type": "int_agg", "count": 1, "sum": 1, "sum_sq": 1, "min": 1, "max": 1, "mean": 1, "sum_sq_diff": 0}})),
@@ -930,11 +933,12 @@ mod tests {
 
     #[pg_test]
     fn test_merge_empty_inputs() {
+        // The scalar merge always returns a finalized stats_agg (3.0).
         let result = Spi::get_one::<pgrx::JsonB>(
             "SELECT jsonb_stats_merge('{}'::jsonb, '{}'::jsonb)",
         );
         let val = result.unwrap().unwrap().0;
-        assert_eq!(val, serde_json::json!({}));
+        assert_eq!(val, serde_json::json!({"type": "stats_agg"}));
     }
 
     #[pg_test]
@@ -1119,24 +1123,18 @@ mod tests {
             "cv_pct should be NULL when mean=0 (0/0 → NaN → guarded to NULL)");
     }
 
-    #[pg_test(error = "jsonb_stats: non-finite value in round2 (inf). Input data likely caused numeric overflow.")]
-    fn test_agg_float_overflow_errors() {
-        // Construct Internal state with Inf sum_sq_diff (simulates overflow from extreme values)
-        use crate::state::{AggEntry, NumFields, StatsState};
-
-        let mut state = StatsState::default();
-        state.entries.insert("x".to_string(), AggEntry::FloatAgg(NumFields {
-            count: 2,
-            sum: 0.0,
-            min: -1e154,
-            max: 1e154,
-            mean: 0.0,
-            sum_sq_diff: f64::INFINITY,
-        }));
-
-        let ptr = Box::into_raw(Box::new(state));
-        let internal = pgrx::Internal::from(Some(pgrx::pg_sys::Datum::from(ptr as usize)));
-        unsafe { crate::jsonb_stats_final_internal(internal) };
+    #[pg_test]
+    fn test_agg_float_extremes_do_not_overflow() {
+        // f64 state overflowed to inf here (sum of squares of 1e154 and 1e300).
+        // Exact state has no overflow: the result is finite and exact.
+        let result = Spi::get_one::<pgrx::JsonB>(
+            "SELECT jsonb_stats_agg(jsonb_build_object('x', stat(v)))
+             FROM (VALUES (1e300::float8), (-1e300::float8), (1e154::float8)) AS t(v)",
+        );
+        let val = result.unwrap().unwrap().0;
+        assert_eq!(val["x"]["count"], 3);
+        assert_eq!(val["x"]["sum"].to_string(), format!("1{}", "0".repeat(154)));
+        assert!(val["x"]["stddev"].is_number());
     }
 
     // ── Group F: Stress test ──
