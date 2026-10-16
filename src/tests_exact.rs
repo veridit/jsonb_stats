@@ -367,6 +367,42 @@ fn test_exact_stat_rejects_non_finite() {
     }
 }
 
+#[pg_test]
+fn test_exact_stat_arrays_and_fallback() {
+    // Arrays map to arr (README type map); other types fall back to their text output.
+    let cases = [
+        ("ARRAY['a','b']::text[]", r#"{"type": "arr", "value": "{a,b}"}"#),
+        ("ARRAY[1,2,3]", r#"{"type": "arr", "value": "{1,2,3}"}"#),
+        ("'2024-01-15 10:30:00'::timestamp", r#"{"type": "str", "value": "2024-01-15 10:30:00"}"#),
+        ("'f47ac10b-58cc-4372-a567-0e02b2c3d479'::uuid", r#"{"type": "str", "value": "f47ac10b-58cc-4372-a567-0e02b2c3d479"}"#),
+    ];
+    for (expr, want) in cases {
+        assert_eq!(sql_text(&format!("SELECT stat({expr})::text")), want, "stat({expr})");
+    }
+    let got = sql_text(
+        "SELECT (jsonb_stats_agg(jsonb_build_object('tags', stat(t)))->'tags')::text
+         FROM (VALUES (ARRAY['a','b']), (ARRAY['b'])) AS v(t)",
+    );
+    assert_eq!(got, r#"{"type": "arr_agg", "count": 2, "counts": {"a": 1, "b": 2}}"#);
+}
+
+#[pg_test]
+fn test_exact_accum_rejects_type_change_for_key() {
+    let int_then_float = r#"(VALUES (1, '{"x": {"type": "int", "value": 1}}'::jsonb), (2, '{"x": {"type": "float", "value": 1.5}}'::jsonb)) t(o, s)"#;
+    let want = "jsonb_stats: type mismatch for key 'x': existing int_agg vs incoming float";
+    assert_eq!(sql_error(&format!("SELECT jsonb_stats_agg(s ORDER BY o) FROM {int_then_float}")), want, "agg");
+    assert_eq!(
+        sql_error(r#"SELECT jsonb_stats_accum(jsonb_stats_accum('{}', '{"x": {"type": "int", "value": 1}}'), '{"x": {"type": "float", "value": 1.5}}')"#),
+        want,
+        "accum"
+    );
+    assert_eq!(
+        sql_error(r#"SELECT jsonb_stats_accum(jsonb_stats_accum('{}', '{"x": {"type": "int", "value": 1}}'), '{"x": {"type": "str", "value": "a"}}')"#),
+        "jsonb_stats: type mismatch for key 'x': existing int_agg vs incoming str",
+        "accum int then str"
+    );
+}
+
 // ── Reference parity: Rust and PL/pgSQL produce identical bytes ──
 
 #[pg_test]
