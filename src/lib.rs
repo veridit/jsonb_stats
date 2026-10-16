@@ -91,6 +91,8 @@ mod tests {
             .expect("Failed to load PL/pgSQL reference");
     }
 
+    include!("tests_exact.rs");
+
     #[pg_test]
     fn test_extension_loads() {
         // Verify the extension loaded successfully
@@ -181,8 +183,10 @@ mod tests {
         assert_eq!(num["type"], "int_agg");
         assert_eq!(num["count"], 1);
         assert_eq!(num["sum"], 150);
-        assert_eq!(num["mean"], 150);
-        assert_eq!(num["sum_sq_diff"], 0);
+        assert_eq!(num["sum_sq"], 22500);
+        // Running state carries only exact state fields; derived fields come from final.
+        assert!(num.get("mean").is_none());
+        assert!(num.get("sum_sq_diff").is_none());
     }
 
     #[pg_test]
@@ -266,8 +270,8 @@ mod tests {
     fn test_merge_int_agg() {
         let result = Spi::get_one::<pgrx::JsonB>(
             "SELECT jsonb_stats_merge(
-                '{\"num\": {\"type\": \"int_agg\", \"count\": 2, \"sum\": 200, \"min\": 50, \"max\": 150, \"mean\": 100, \"sum_sq_diff\": 5000}}'::jsonb,
-                '{\"num\": {\"type\": \"int_agg\", \"count\": 1, \"sum\": 2500, \"min\": 2500, \"max\": 2500, \"mean\": 2500, \"sum_sq_diff\": 0}}'::jsonb
+                '{\"num\": {\"type\": \"int_agg\", \"count\": 2, \"sum\": 200, \"sum_sq\": 25000, \"min\": 50, \"max\": 150, \"mean\": 100, \"sum_sq_diff\": 5000}}'::jsonb,
+                '{\"num\": {\"type\": \"int_agg\", \"count\": 1, \"sum\": 2500, \"sum_sq\": 6250000, \"min\": 2500, \"max\": 2500, \"mean\": 2500, \"sum_sq_diff\": 0}}'::jsonb
             )",
         );
         let val = result.unwrap().unwrap().0;
@@ -309,11 +313,11 @@ mod tests {
         load_plpgsql_reference();
         let ok = Spi::get_one::<bool>(
             "SELECT jsonb_stats_merge(
-                '{\"num\": {\"type\": \"int_agg\", \"count\": 2, \"sum\": 200, \"min\": 50, \"max\": 150, \"mean\": 100, \"sum_sq_diff\": 5000}}'::jsonb,
-                '{\"num\": {\"type\": \"int_agg\", \"count\": 1, \"sum\": 2500, \"min\": 2500, \"max\": 2500, \"mean\": 2500, \"sum_sq_diff\": 0}}'::jsonb
+                '{\"num\": {\"type\": \"int_agg\", \"count\": 2, \"sum\": 200, \"sum_sq\": 25000, \"min\": 50, \"max\": 150, \"mean\": 100, \"sum_sq_diff\": 5000}}'::jsonb,
+                '{\"num\": {\"type\": \"int_agg\", \"count\": 1, \"sum\": 2500, \"sum_sq\": 6250000, \"min\": 2500, \"max\": 2500, \"mean\": 2500, \"sum_sq_diff\": 0}}'::jsonb
             ) = jsonb_stats_merge_plpgsql(
-                '{\"num\": {\"type\": \"int_agg\", \"count\": 2, \"sum\": 200, \"min\": 50, \"max\": 150, \"mean\": 100, \"sum_sq_diff\": 5000}}'::jsonb,
-                '{\"num\": {\"type\": \"int_agg\", \"count\": 1, \"sum\": 2500, \"min\": 2500, \"max\": 2500, \"mean\": 2500, \"sum_sq_diff\": 0}}'::jsonb
+                '{\"num\": {\"type\": \"int_agg\", \"count\": 2, \"sum\": 200, \"sum_sq\": 25000, \"min\": 50, \"max\": 150, \"mean\": 100, \"sum_sq_diff\": 5000}}'::jsonb,
+                '{\"num\": {\"type\": \"int_agg\", \"count\": 1, \"sum\": 2500, \"sum_sq\": 6250000, \"min\": 2500, \"max\": 2500, \"mean\": 2500, \"sum_sq_diff\": 0}}'::jsonb
             )",
         );
         assert_eq!(ok, Ok(Some(true)));
@@ -325,7 +329,7 @@ mod tests {
     fn test_final_int_agg() {
         let result = Spi::get_one::<pgrx::JsonB>(
             "SELECT jsonb_stats_final(
-                '{\"num\": {\"type\": \"int_agg\", \"count\": 2, \"sum\": 200, \"min\": 50, \"max\": 150, \"mean\": 100, \"sum_sq_diff\": 5000}}'::jsonb
+                '{\"num\": {\"type\": \"int_agg\", \"count\": 2, \"sum\": 200, \"sum_sq\": 25000, \"min\": 50, \"max\": 150, \"mean\": 100, \"sum_sq_diff\": 5000}}'::jsonb
             )",
         );
         let val = result.unwrap().unwrap().0;
@@ -347,7 +351,7 @@ mod tests {
     fn test_final_single_count_nulls() {
         let result = Spi::get_one::<pgrx::JsonB>(
             "SELECT jsonb_stats_final(
-                '{\"num\": {\"type\": \"int_agg\", \"count\": 1, \"sum\": 100, \"min\": 100, \"max\": 100, \"mean\": 100, \"sum_sq_diff\": 0}}'::jsonb
+                '{\"num\": {\"type\": \"int_agg\", \"count\": 1, \"sum\": 100, \"sum_sq\": 10000, \"min\": 100, \"max\": 100, \"mean\": 100, \"sum_sq_diff\": 0}}'::jsonb
             )",
         );
         let val = result.unwrap().unwrap().0;
@@ -361,9 +365,9 @@ mod tests {
         load_plpgsql_reference();
         let ok = Spi::get_one::<bool>(
             "SELECT jsonb_stats_final(
-                '{\"num\": {\"type\": \"int_agg\", \"count\": 2, \"sum\": 200, \"min\": 50, \"max\": 150, \"mean\": 100, \"sum_sq_diff\": 5000}}'::jsonb
+                '{\"num\": {\"type\": \"int_agg\", \"count\": 2, \"sum\": 200, \"sum_sq\": 25000, \"min\": 50, \"max\": 150, \"mean\": 100, \"sum_sq_diff\": 5000}}'::jsonb
             ) = jsonb_stats_final_plpgsql(
-                '{\"num\": {\"type\": \"int_agg\", \"count\": 2, \"sum\": 200, \"min\": 50, \"max\": 150, \"mean\": 100, \"sum_sq_diff\": 5000}}'::jsonb
+                '{\"num\": {\"type\": \"int_agg\", \"count\": 2, \"sum\": 200, \"sum_sq\": 25000, \"min\": 50, \"max\": 150, \"mean\": 100, \"sum_sq_diff\": 5000}}'::jsonb
             )",
         );
         assert_eq!(ok, Ok(Some(true)));
@@ -394,10 +398,10 @@ mod tests {
         let ok = Spi::get_one::<bool>(
             "WITH agg_data(stats_agg) AS (
                 VALUES
-                    ('{\"num\": {\"type\": \"int_agg\", \"count\": 2, \"sum\": 200, \"min\": 50, \"max\": 150, \"mean\": 100, \"sum_sq_diff\": 5000},
+                    ('{\"num\": {\"type\": \"int_agg\", \"count\": 2, \"sum\": 200, \"sum_sq\": 25000, \"min\": 50, \"max\": 150, \"mean\": 100, \"sum_sq_diff\": 5000},
                       \"ind\": {\"type\": \"str_agg\", \"counts\": {\"tech\": 2}},
                       \"ok\": {\"type\": \"bool_agg\", \"counts\": {\"true\": 1, \"false\": 1}}}'::jsonb),
-                    ('{\"num\": {\"type\": \"int_agg\", \"count\": 1, \"sum\": 2500, \"min\": 2500, \"max\": 2500, \"mean\": 2500, \"sum_sq_diff\": 0},
+                    ('{\"num\": {\"type\": \"int_agg\", \"count\": 1, \"sum\": 2500, \"sum_sq\": 6250000, \"min\": 2500, \"max\": 2500, \"mean\": 2500, \"sum_sq_diff\": 0},
                       \"ind\": {\"type\": \"str_agg\", \"counts\": {\"finance\": 1}},
                       \"ok\": {\"type\": \"bool_agg\", \"counts\": {\"true\": 1}}}'::jsonb)
             )
@@ -462,8 +466,8 @@ mod tests {
     fn test_merge_float_agg() {
         let result = Spi::get_one::<pgrx::JsonB>(
             "SELECT jsonb_stats_merge(
-                '{\"price\": {\"type\": \"float_agg\", \"count\": 2, \"sum\": 6.28, \"min\": 2.14, \"max\": 4.14, \"mean\": 3.14, \"sum_sq_diff\": 2}}'::jsonb,
-                '{\"price\": {\"type\": \"float_agg\", \"count\": 1, \"sum\": 9.99, \"min\": 9.99, \"max\": 9.99, \"mean\": 9.99, \"sum_sq_diff\": 0}}'::jsonb
+                '{\"price\": {\"type\": \"float_agg\", \"count\": 2, \"sum\": 6.28, \"sum_sq\": 21.7192, \"min\": 2.14, \"max\": 4.14, \"mean\": 3.14, \"sum_sq_diff\": 2}}'::jsonb,
+                '{\"price\": {\"type\": \"float_agg\", \"count\": 1, \"sum\": 9.99, \"sum_sq\": 99.8001, \"min\": 9.99, \"max\": 9.99, \"mean\": 9.99, \"sum_sq_diff\": 0}}'::jsonb
             )",
         );
         let val = result.unwrap().unwrap().0;
@@ -477,7 +481,7 @@ mod tests {
     fn test_final_float_agg() {
         let result = Spi::get_one::<pgrx::JsonB>(
             "SELECT jsonb_stats_final(
-                '{\"price\": {\"type\": \"float_agg\", \"count\": 2, \"sum\": 200, \"min\": 50, \"max\": 150, \"mean\": 100, \"sum_sq_diff\": 5000}}'::jsonb
+                '{\"price\": {\"type\": \"float_agg\", \"count\": 2, \"sum\": 200, \"sum_sq\": 25000, \"min\": 50, \"max\": 150, \"mean\": 100, \"sum_sq_diff\": 5000}}'::jsonb
             )",
         );
         let val = result.unwrap().unwrap().0;
@@ -710,7 +714,7 @@ mod tests {
             "WITH data(agg) AS (
                 VALUES
                     (NULL::jsonb),
-                    ('{\"num\": {\"type\": \"int_agg\", \"count\": 2, \"sum\": 200, \"min\": 50, \"max\": 150, \"mean\": 100, \"sum_sq_diff\": 5000}}'::jsonb),
+                    ('{\"num\": {\"type\": \"int_agg\", \"count\": 2, \"sum\": 200, \"sum_sq\": 25000, \"min\": 50, \"max\": 150, \"mean\": 100, \"sum_sq_diff\": 5000}}'::jsonb),
                     (NULL::jsonb)
             )
             SELECT jsonb_stats_merge_agg(agg) FROM data",
@@ -837,7 +841,7 @@ mod tests {
     #[pg_test(error = "jsonb_stats: type mismatch in merge: 'int_agg' vs 'str_agg'")]
     fn test_merge_rejects_type_mismatch() {
         crate::jsonb_stats_merge(
-            pgrx::JsonB(serde_json::json!({"x": {"type": "int_agg", "count": 1, "sum": 1, "min": 1, "max": 1, "mean": 1, "sum_sq_diff": 0}})),
+            pgrx::JsonB(serde_json::json!({"x": {"type": "int_agg", "count": 1, "sum": 1, "sum_sq": 1, "min": 1, "max": 1, "mean": 1, "sum_sq_diff": 0}})),
             pgrx::JsonB(serde_json::json!({"x": {"type": "str_agg", "counts": {"a": 1}}})),
         );
     }
