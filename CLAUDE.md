@@ -15,6 +15,8 @@ The Makefile handles the pgrx environment variables (macOS SDK path workaround):
 ```bash
 make test        # Run all tests (pg_tests: correctness + exactness + error handling + benchmarks; plus unit tests)
 make test PG_VERSION="pg18 test_exact"   # Only the exactness/determinism suite (fast)
+make fixture-check   # Fail if dev/fixtures/exact_fixture.sql is stale (make fixture regenerates)
+make xarch           # Docker: identical output on linux amd64 and arm64
 make run         # Launch psql with extension loaded
 make install     # Install into system PostgreSQL
 make package     # Build installable package

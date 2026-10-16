@@ -405,7 +405,7 @@ The Rust implementation (via pgrx) uses native `HashMap` state with `Box` heap a
 
 (Apple M-series, PostgreSQL 18, jsonb_stats 3.0, two full suite runs; the 10K-row timing is noisy at this size.) The merge speedup is larger because PL/pgSQL performs full JSONB serialization round-trips per group, while Rust merges native structs and only serializes once in the finalfunc.
 
-Exact arithmetic costs little: per 100K rows, `int` and `str` accumulate as fast as the earlier f64 implementation, and `float` (16-17 significant digits per value) takes about 25% longer.
+Exact arithmetic costs little. Per 100K rows, measured against the earlier f64 implementation: `str` is unchanged, `int` takes about 10% longer, and `float` (16-17 significant digits per value) takes about 25% longer.
 
 ### Parallel aggregation
 

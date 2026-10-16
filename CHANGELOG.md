@@ -53,9 +53,11 @@ Root causes (both in 2.x Rust and the 2.x PL/pgSQL reference):
 - `src/tests_exact.rs`: byte-identical output across row orders, groupings,
   merge orders, two-level merges, scalar folds and forced parallel plans,
   plus reference parity. Full suite: 96 pg_tests + unit tests pass.
-- Cross-architecture (`dev/xarch_checks.sql`, `dev/xarch_checks_rust.sql`):
+- Cross-architecture (`make xarch`, `dev/xarch/`, `dev/xarch_checks*.sql`):
   the same 10 checks give identical output and md5 on macOS arm64,
   Linux arm64 and Linux amd64 (x86_64 build cross-compiled, run under
   emulation). Fixture output md5 `6a5ccf0d8485ceaf6debc2d615874145`.
+- `make fixture-check` fails if the committed oracle fixture is stale.
 - Benchmarks still far ahead of the reference (393-511x accumulate,
-  9,098-10,116x merge).
+  9,098-10,116x merge). Against 2.x per 100K rows: `str` unchanged, `int`
+  about 10% slower, `float` about 25% slower (the exactness cost).
