@@ -271,32 +271,139 @@ fn test_exact_derived_input_fields_ignored() {
     );
 }
 
+// ── Legacy (2.x) summaries: upgraded on read ──
+//
+// 2.x summaries have no sum_sq. It is rebuilt as well as possible from the
+// stored count, sum and sum_sq_diff:
+//   sum_sq = round(sum_sq_diff + sum^2 / count) at the kind's sum_sq scale,
+//   clamped up to ceil(sum^2 / count) so the state stays consistent.
+// For int/nat the true sum_sq is integral, so it is recovered exactly whenever
+// the stored error is < 0.5. The next recompute from source data is exact.
+
 const LEGACY_INT_AGG: &str = r#"{"x": {"type": "int_agg", "count": 2, "sum": 200, "min": 50, "max": 150, "mean": 100.00, "sum_sq_diff": 5000.00}}"#;
-const LEGACY_ERROR: &str = "jsonb_stats: int_agg for key 'x' lacks 'sum_sq' (created by jsonb_stats < 3.0). Recompute it from the source stats.";
+
+/// jsonb_stats_accum(summary, '{}') returns the parsed exact state.
+fn legacy_state(summary: &str) -> String {
+    sql_text(&format!(
+        "SELECT jsonb_stats_accum('{summary}'::jsonb, '{{}}'::jsonb)::text"
+    ))
+}
 
 #[pg_test]
-fn test_exact_legacy_summary_rejected_everywhere() {
-    let fresh =
-        r#"{"x": {"type": "int_agg", "count": 1, "sum": 1, "sum_sq": 1, "min": 1, "max": 1}}"#;
-    for query in [
-    format!("SELECT jsonb_stats_merge('{LEGACY_INT_AGG}', '{fresh}')"),
-    format!("SELECT jsonb_stats_merge('{fresh}', '{LEGACY_INT_AGG}')"),
-    format!("SELECT jsonb_stats_merge_agg(a) FROM (VALUES ('{fresh}'::jsonb), ('{LEGACY_INT_AGG}'::jsonb)) t(a)"),
-    format!("SELECT jsonb_stats_final('{LEGACY_INT_AGG}')"),
-    format!("SELECT jsonb_stats_accum('{LEGACY_INT_AGG}', '{{\"x\": {{\"type\": \"int\", \"value\": 1}}}}')"),
-] {
-    assert_eq!(sql_error(&query), LEGACY_ERROR, "{query}");
-}
+fn test_exact_legacy_sum_sq_rebuilt() {
+    let cases = [
+        // exact recovery: 50, 150
+        (
+            LEGACY_INT_AGG,
+            r#"{"x": {"max": 150, "min": 50, "sum": 200, "type": "int_agg", "count": 2, "sum_sq": 25000}}"#,
+        ),
+        // exact recovery despite the rounded sum_sq_diff: 1, 2, 2 -> sum_sq 9
+        (
+            r#"{"x": {"type": "int_agg", "count": 3, "sum": 5, "min": 1, "max": 2, "mean": 1.67, "sum_sq_diff": 0.67}}"#,
+            r#"{"x": {"max": 2, "min": 1, "sum": 5, "type": "int_agg", "count": 3, "sum_sq": 9}}"#,
+        ),
+        // nat behaves like int
+        (
+            r#"{"x": {"type": "nat_agg", "count": 3, "sum": 15, "min": 0, "max": 10, "mean": 5.00, "sum_sq_diff": 50.00}}"#,
+            r#"{"x": {"max": 10, "min": 0, "sum": 15, "type": "nat_agg", "count": 3, "sum_sq": 125}}"#,
+        ),
+        // dec2: best effort (true sum_sq is 7.2500; 2.x stored sum_sq_diff rounded to 1.13)
+        (
+            r#"{"x": {"type": "dec2_agg", "count": 2, "sum": 3.5, "min": 1, "max": 2.5, "mean": 1.75, "sum_sq_diff": 1.13}}"#,
+            r#"{"x": {"max": 2.50, "min": 1.00, "sum": 3.50, "type": "dec2_agg", "count": 2, "sum_sq": 7.2550}}"#,
+        ),
+        // float: f64 noise in the old sum is kept as is
+        (
+            r#"{"x": {"type": "float_agg", "count": 2, "sum": 0.30000000000000004, "min": 0.1, "max": 0.2, "mean": 0.15, "sum_sq_diff": 0.01}}"#,
+            r#"{"x": {"max": 0.2, "min": 0.1, "sum": 0.30000000000000004, "type": "float_agg", "count": 2, "sum_sq": 0.0550000000000000120000000000000008}}"#,
+        ),
+        // clamp: a slightly negative stored sum_sq_diff cannot make the state inconsistent
+        (
+            r#"{"x": {"type": "float_agg", "count": 2, "sum": 2, "min": 1, "max": 1, "mean": 1, "sum_sq_diff": -0.0000001}}"#,
+            r#"{"x": {"max": 1, "min": 1, "sum": 2, "type": "float_agg", "count": 2, "sum_sq": 2}}"#,
+        ),
+        // single value: sum_sq = sum^2 exactly
+        (
+            r#"{"x": {"type": "int_agg", "count": 1, "sum": 7, "min": 7, "max": 7, "mean": 7.00, "sum_sq_diff": 0.00}}"#,
+            r#"{"x": {"max": 7, "min": 7, "sum": 7, "type": "int_agg", "count": 1, "sum_sq": 49}}"#,
+        ),
+    ];
+    for (legacy, want) in cases {
+        assert_eq!(legacy_state(legacy), want, "{legacy}");
+    }
 }
 
-#[pg_test(
-    error = "jsonb_stats: int_agg for key 'x' lacks 'sum_sq' (created by jsonb_stats < 3.0). Recompute it from the source stats."
-)]
-fn test_exact_legacy_summary_rejected_direct() {
-    crate::jsonb_stats_merge(
-        pgrx::JsonB(serde_json::from_str(LEGACY_INT_AGG).unwrap()),
-        pgrx::JsonB(serde_json::from_str(LEGACY_INT_AGG).unwrap()),
+#[pg_test]
+fn test_exact_legacy_accepted_everywhere() {
+    let fresh =
+        r#"{"x": {"type": "int_agg", "count": 1, "sum": 2500, "sum_sq": 6250000, "min": 2500, "max": 2500}}"#;
+    // 50, 150 (legacy) + 2500 (fresh) == the exact 3-row summary
+    let want = r#"{"x": {"max": 2500, "min": 50, "sum": 2700, "mean": 900.00, "type": "int_agg", "count": 3, "stddev": 1386.54, "sum_sq": 6275000, "variance": 1922500.00, "sum_sq_diff": 3845000.00, "coefficient_of_variation_pct": 154.06}, "type": "stats_agg"}"#;
+    for query in [
+        format!("SELECT jsonb_stats_merge('{LEGACY_INT_AGG}', '{fresh}')::text"),
+        format!("SELECT jsonb_stats_merge('{fresh}', '{LEGACY_INT_AGG}')::text"),
+        format!("SELECT jsonb_stats_merge_agg(a)::text FROM (VALUES ('{fresh}'::jsonb), ('{LEGACY_INT_AGG}'::jsonb)) t(a)"),
+        format!(
+            "SELECT jsonb_stats_final(jsonb_stats_accum('{LEGACY_INT_AGG}', '{{\"x\": {{\"type\": \"int\", \"value\": 2500}}}}'))::text"
+        ),
+    ] {
+        assert_eq!(sql_text(&query), want, "{query}");
+    }
+    // Once rewritten, the summary carries sum_sq and is stable.
+    let once = sql_text(&format!("SELECT jsonb_stats_final('{LEGACY_INT_AGG}')::text"));
+    let twice = sql_text(&format!(
+        "SELECT jsonb_stats_final(jsonb_stats_final('{LEGACY_INT_AGG}'))::text"
+    ));
+    assert_eq!(once, twice);
+    assert!(once.contains(r#""sum_sq": 25000"#), "{once}");
+}
+
+#[pg_test]
+fn test_exact_legacy_without_sum_sq_diff_rejected() {
+    let bad = r#"{"x": {"type": "int_agg", "count": 2, "sum": 200, "min": 50, "max": 150}}"#;
+    assert_eq!(
+        sql_error(&format!("SELECT jsonb_stats_final('{bad}')")),
+        "jsonb_stats: int_agg for key 'x' has neither 'sum_sq' nor 'sum_sq_diff'"
     );
+}
+
+#[pg_test]
+fn test_exact_legacy_reference_parity() {
+    load_plpgsql_reference();
+    let fresh =
+        r#"{"x": {"type": "int_agg", "count": 1, "sum": 2500, "sum_sq": 6250000, "min": 2500, "max": 2500}}"#;
+    let legacies = [
+        LEGACY_INT_AGG,
+        r#"{"x": {"type": "int_agg", "count": 73, "sum": 3554078835, "min": 0, "max": 90000000, "mean": 48686011.44, "sum_sq_diff": 72475317361765168.00}}"#,
+        r#"{"x": {"type": "dec2_agg", "count": 2, "sum": 3.5, "min": 1, "max": 2.5, "mean": 1.75, "sum_sq_diff": 1.13}}"#,
+        r#"{"x": {"type": "float_agg", "count": 2, "sum": 0.30000000000000004, "min": 0.1, "max": 0.2, "mean": 0.15, "sum_sq_diff": 0.01}}"#,
+        r#"{"x": {"type": "float_agg", "count": 2, "sum": 2, "min": 1, "max": 1, "mean": 1, "sum_sq_diff": -0.0000001}}"#,
+    ];
+    for legacy in legacies {
+        for (rust, reference) in [
+            (
+                format!("jsonb_stats_final('{legacy}')"),
+                format!("jsonb_stats_final_plpgsql('{legacy}')"),
+            ),
+            (
+                format!("jsonb_stats_merge('{legacy}', '{legacy}')"),
+                format!("jsonb_stats_merge_plpgsql('{legacy}', '{legacy}')"),
+            ),
+        ] {
+            assert_eq!(
+                sql_text(&format!("SELECT ({rust})::text")),
+                sql_text(&format!("SELECT ({reference})::text")),
+                "{rust}"
+            );
+        }
+    }
+    let r = sql_text(&format!(
+        "SELECT jsonb_stats_merge('{LEGACY_INT_AGG}', '{fresh}')::text"
+    ));
+    let p = sql_text(&format!(
+        "SELECT jsonb_stats_merge_plpgsql('{LEGACY_INT_AGG}', '{fresh}')::text"
+    ));
+    assert_eq!(r, p);
 }
 
 // ── Fail-fast validation of numeric values (both accum paths) ──
