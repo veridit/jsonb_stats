@@ -564,4 +564,144 @@ mod unit {
             "-170141183460469231731687303715884105729"
         );
     }
+
+    #[test]
+    fn fast_path_matches_bigint_model() {
+        use num_bigint::BigInt as B;
+        // Pure-BigInt model of a decimal: (mantissa, scale).
+        fn model(s: &str) -> (B, u32) {
+            let (neg, body) = s.strip_prefix('-').map_or((false, s), |r| (true, r));
+            let (i, f) = body.split_once('.').unwrap_or((body, ""));
+            let m: B = format!("{i}{f}").parse().unwrap();
+            (if neg { -m } else { m }, f.len() as u32)
+        }
+        fn at(m: &(B, u32), k: u32) -> B {
+            &m.0 * pow10(k - m.1)
+        }
+        fn show(m: &B, k: u32) -> String {
+            let neg = m.is_negative();
+            let digits = m.magnitude().to_str_radix(10);
+            let body = if k == 0 {
+                digits
+            } else {
+                let p = format!("{digits:0>w$}", w = k as usize + 1);
+                let (a, b) = p.split_at(p.len() - k as usize);
+                format!("{a}.{b}")
+            };
+            if neg {
+                format!("-{body}")
+            } else {
+                body
+            }
+        }
+        // Deterministic xorshift PRNG.
+        let mut st: u64 = 0x9E3779B97F4A7C15;
+        let mut rnd = move |n: u64| {
+            st ^= st << 13;
+            st ^= st >> 7;
+            st ^= st << 17;
+            st % n
+        };
+        let boundary = [
+            i128::MAX.to_string(),
+            (i128::MAX - 1).to_string(),
+            i128::MIN.to_string(),
+            "170141183460469231731687303715884105728".to_string(),
+            "13043817825332782212".to_string(),
+            "13043817825332782213".to_string(),
+            "99999999999999999999999999999999999999".to_string(),
+        ];
+        let mut gen = |rnd: &mut dyn FnMut(u64) -> u64| -> String {
+            if rnd(10) == 0 {
+                let b = &boundary[rnd(boundary.len() as u64) as usize];
+                let sc = rnd(3) as usize;
+                let s = if sc > 0 && b.len() > sc + 1 && !b.starts_with('-') {
+                    format!("{}.{}", &b[..b.len() - sc], &b[b.len() - sc..])
+                } else {
+                    b.clone()
+                };
+                return if rnd(2) == 0 && !s.starts_with('-') {
+                    format!("-{s}")
+                } else {
+                    s
+                };
+            }
+            let ilen = 1 + rnd(30) as usize;
+            let flen = rnd(31) as usize;
+            let digit = |rnd: &mut dyn FnMut(u64) -> u64| char::from(b'0' + rnd(10) as u8);
+            let mut i: String = (0..ilen).map(|_| digit(rnd)).collect();
+            i = i.trim_start_matches('0').to_string();
+            if i.is_empty() {
+                i = "0".into();
+            }
+            let f: String = (0..flen).map(|_| digit(rnd)).collect();
+            let s = if flen > 0 { format!("{i}.{f}") } else { i };
+            if rnd(2) == 0 {
+                format!("-{s}")
+            } else {
+                s
+            }
+        };
+        for case in 0..50_000 {
+            let (sa, sb) = (gen(&mut rnd), gen(&mut rnd));
+            let (a, b) = (d(&sa), d(&sb));
+            let (ma, mb) = (model(&sa), model(&sb));
+            // parse / display round-trip
+            assert_eq!(a.to_string(), show(&ma.0, ma.1), "parse {sa}");
+            // add
+            let k = ma.1.max(mb.1);
+            let sum = a.add(&b);
+            assert_eq!(
+                sum.to_string(),
+                show(&(at(&ma, k) + at(&mb, k)), k),
+                "#{case} {sa} + {sb}"
+            );
+            // in-place accumulation of several values (exercises Big += Small etc.)
+            let mut acc = a.clone();
+            acc.add_assign(&b);
+            acc.add_assign(&a);
+            assert_eq!(
+                acc.to_string(),
+                show(&(at(&ma, k) * 2u8 + at(&mb, k)), k),
+                "#{case} acc {sa} {sb}"
+            );
+            // mul / square
+            assert_eq!(
+                a.mul(&b).to_string(),
+                show(&(&ma.0 * &mb.0), ma.1 + mb.1),
+                "#{case} {sa} * {sb}"
+            );
+            assert_eq!(
+                a.square().to_string(),
+                show(&(&ma.0 * &ma.0), 2 * ma.1),
+                "#{case} {sa}^2"
+            );
+            // compare (scale-insensitive) and min/max tie rule
+            assert_eq!(
+                a.cmp_value(&b),
+                at(&ma, k).cmp(&at(&mb, k)),
+                "#{case} cmp {sa} {sb}"
+            );
+            // rounding to 2 decimals
+            let want_r = if ma.1 <= 2 {
+                show(&(&ma.0 * pow10(2 - ma.1)), 2)
+            } else {
+                show(&round_half_away(&ma.0, &pow10(ma.1 - 2)), 2)
+            };
+            assert_eq!(a.round_to(2).to_string(), want_r, "#{case} round {sa}");
+            // integrality and negation
+            assert_eq!(
+                a.is_integral(),
+                (&ma.0 % pow10(ma.1)).is_zero(),
+                "#{case} integral {sa}"
+            );
+            assert_eq!(
+                a.clone().negated().to_string(),
+                show(&-ma.0.clone(), ma.1),
+                "#{case} neg {sa}"
+            );
+            // canonical form: equal values at equal scale compare equal structurally
+            assert_eq!(sum.clone().add(&d("0")), sum, "#{case} canonical");
+        }
+    }
 }
