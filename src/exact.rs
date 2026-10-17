@@ -1,9 +1,16 @@
 //! Exact decimal arithmetic for numeric aggregates.
 //!
-//! A [`Decimal`] is `mantissa / 10^scale` with an arbitrary-precision
-//! mantissa. Addition and multiplication are exact, so accumulating and
-//! merging summaries is associative and commutative: the result does not
-//! depend on row order, grouping, parallel plan or CPU.
+//! A [`Decimal`] is `mantissa / 10^scale`. Addition and multiplication are
+//! exact, so accumulating and merging summaries is associative and
+//! commutative: the result does not depend on row order, grouping, parallel
+//! plan or CPU.
+//!
+//! **Fast path.** The mantissa is an `i128` while it fits (about 38 digits),
+//! and an arbitrary-precision `BigInt` otherwise. Every operation is checked:
+//! an `i128` overflow redoes that operation in `BigInt`, and a `BigInt` result
+//! that fits in `i128` is stored as `i128` again. Both forms hold the same
+//! exact integer, and the form is chosen only by magnitude, so it never
+//! affects a result and never appears in the JSON.
 //!
 //! Derived statistics are rationals (or square roots of rationals) of the
 //! exact state; they are rounded exactly once, to 2 decimals, half away from
@@ -13,14 +20,134 @@ use std::cmp::Ordering;
 use std::fmt;
 use std::str::FromStr;
 
-use num_bigint::{BigInt, Sign};
+use num_bigint::BigInt;
 use num_integer::Integer;
-use num_traits::{Signed, Zero};
+use num_traits::{Signed, ToPrimitive, Zero};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+/// An exact integer: `i128` while it fits, `BigInt` beyond.
+/// Invariant: `Big` never holds a value that fits in `i128`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Mant {
+    Small(i128),
+    Big(BigInt),
+}
+
+impl Mant {
+    fn from_big(b: BigInt) -> Mant {
+        match b.to_i128() {
+            Some(v) => Mant::Small(v),
+            None => Mant::Big(b),
+        }
+    }
+
+    fn to_big(&self) -> BigInt {
+        match self {
+            Mant::Small(v) => BigInt::from(*v),
+            Mant::Big(b) => b.clone(),
+        }
+    }
+
+    fn is_negative(&self) -> bool {
+        match self {
+            Mant::Small(v) => *v < 0,
+            Mant::Big(b) => b.is_negative(),
+        }
+    }
+
+    fn add(&self, o: &Mant) -> Mant {
+        let mut out = self.clone();
+        out.add_assign(o);
+        out
+    }
+
+    /// In place, without cloning a BigInt accumulator (the hot path once a
+    /// running sum has outgrown i128).
+    fn add_assign(&mut self, o: &Mant) {
+        match (&mut *self, o) {
+            (Mant::Small(a), Mant::Small(b)) => match a.checked_add(*b) {
+                Some(v) => *a = v,
+                None => *self = Mant::Big(BigInt::from(*a) + *b),
+            },
+            (Mant::Big(a), Mant::Small(b)) => {
+                *a += *b;
+                self.normalize();
+            }
+            (Mant::Big(a), Mant::Big(b)) => {
+                *a += b;
+                self.normalize();
+            }
+            (Mant::Small(a), Mant::Big(b)) => *self = Mant::from_big(b + *a),
+        }
+    }
+
+    /// Restore the invariant: a Big that fits in i128 becomes Small.
+    fn normalize(&mut self) {
+        if let Mant::Big(b) = self {
+            if let Some(v) = b.to_i128() {
+                *self = Mant::Small(v);
+            }
+        }
+    }
+
+    fn mul(&self, o: &Mant) -> Mant {
+        if let (Mant::Small(a), Mant::Small(b)) = (self, o) {
+            if let Some(v) = a.checked_mul(*b) {
+                return Mant::Small(v);
+            }
+        }
+        Mant::from_big(self.to_big() * o.to_big())
+    }
+
+    /// `self * 10^d`.
+    fn scale_up(&self, d: u32) -> Mant {
+        if d == 0 {
+            return self.clone();
+        }
+        if let Mant::Small(a) = self {
+            if let Some(v) = 10i128.checked_pow(d).and_then(|p| a.checked_mul(p)) {
+                return Mant::Small(v);
+            }
+        }
+        Mant::from_big(self.to_big() * pow10(d))
+    }
+
+    fn neg(self) -> Mant {
+        match self {
+            Mant::Small(v) => match v.checked_neg() {
+                Some(n) => Mant::Small(n),
+                None => Mant::Big(-BigInt::from(v)),
+            },
+            Mant::Big(b) => Mant::from_big(-b),
+        }
+    }
+
+    fn cmp(&self, o: &Mant) -> Ordering {
+        match (self, o) {
+            (Mant::Small(a), Mant::Small(b)) => a.cmp(b),
+            // By the invariant, a Big lies outside the i128 range.
+            (Mant::Small(_), Mant::Big(b)) => {
+                if b.is_negative() {
+                    Ordering::Greater
+                } else {
+                    Ordering::Less
+                }
+            }
+            (Mant::Big(a), Mant::Small(_)) => {
+                if a.is_negative() {
+                    Ordering::Less
+                } else {
+                    Ordering::Greater
+                }
+            }
+            (Mant::Big(a), Mant::Big(b)) => a.cmp(b),
+        }
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Decimal {
-    mantissa: BigInt,
+    mantissa: Mant,
     scale: u32,
 }
 
@@ -33,6 +160,13 @@ fn pow10(n: u32) -> BigInt {
 }
 
 impl Decimal {
+    fn new(mantissa: BigInt, scale: u32) -> Decimal {
+        Decimal {
+            mantissa: Mant::from_big(mantissa),
+            scale,
+        }
+    }
+
     pub fn scale(&self) -> u32 {
         self.scale
     }
@@ -43,18 +177,19 @@ impl Decimal {
 
     /// True if the value is a whole number (regardless of scale).
     pub fn is_integral(&self) -> bool {
-        (&self.mantissa % pow10(self.scale)).is_zero()
+        if self.scale == 0 {
+            return true;
+        }
+        match (&self.mantissa, 10i128.checked_pow(self.scale)) {
+            (Mant::Small(v), Some(p)) => v % p == 0,
+            _ => (self.mantissa.to_big() % pow10(self.scale)).is_zero(),
+        }
     }
 
-    /// Same value at a larger scale (exact).
-    fn rescaled(&self, scale: u32) -> BigInt {
+    /// Mantissa at a larger scale (exact).
+    fn rescaled(&self, scale: u32) -> Mant {
         debug_assert!(scale >= self.scale);
-        match scale - self.scale {
-            0 => self.mantissa.clone(),
-            // 10^19 < u64::MAX: multiply by a machine word, no BigInt power.
-            d @ 1..=19 => &self.mantissa * 10u64.pow(d),
-            d => &self.mantissa * pow10(d),
-        }
+        self.mantissa.scale_up(scale - self.scale)
     }
 
     /// Change the scale. Fails (returns None) if digits would be lost.
@@ -65,8 +200,8 @@ impl Decimal {
                 scale,
             });
         }
-        let (q, r) = self.mantissa.div_rem(&pow10(self.scale - scale));
-        r.is_zero().then_some(Decimal { mantissa: q, scale })
+        let (q, r) = self.mantissa.to_big().div_rem(&pow10(self.scale - scale));
+        r.is_zero().then(|| Decimal::new(q, scale))
     }
 
     /// Round to `scale` decimals, half away from zero.
@@ -78,10 +213,7 @@ impl Decimal {
             };
         }
         let den = pow10(self.scale - scale);
-        Decimal {
-            mantissa: round_half_away(&self.mantissa, &den),
-            scale,
-        }
+        Decimal::new(round_half_away(&self.mantissa.to_big(), &den), scale)
     }
 
     #[cfg(test)]
@@ -91,14 +223,17 @@ impl Decimal {
         out
     }
 
-    /// In-place `self += other`; allocation-free when the scales match.
+    /// In-place `self += other`.
     pub fn add_assign(&mut self, other: &Decimal) {
-        use std::ops::AddAssign;
         match self.scale.cmp(&other.scale) {
             Ordering::Equal => self.mantissa.add_assign(&other.mantissa),
-            Ordering::Greater => self.mantissa.add_assign(other.rescaled(self.scale)),
+            Ordering::Greater => {
+                let o = other.rescaled(self.scale);
+                self.mantissa.add_assign(&o);
+            }
             Ordering::Less => {
-                self.mantissa = self.rescaled(other.scale) + &other.mantissa;
+                self.mantissa = self.rescaled(other.scale);
+                self.mantissa.add_assign(&other.mantissa);
                 self.scale = other.scale;
             }
         }
@@ -106,7 +241,7 @@ impl Decimal {
 
     pub fn mul(&self, other: &Decimal) -> Decimal {
         Decimal {
-            mantissa: &self.mantissa * &other.mantissa,
+            mantissa: self.mantissa.mul(&other.mantissa),
             scale: self.scale + other.scale,
         }
     }
@@ -143,7 +278,7 @@ impl Decimal {
 
     pub fn negated(self) -> Decimal {
         Decimal {
-            mantissa: -self.mantissa,
+            mantissa: self.mantissa.neg(),
             scale: self.scale,
         }
     }
@@ -153,8 +288,19 @@ impl Decimal {
         if !self.is_integral() {
             return None;
         }
-        let whole = &self.mantissa / pow10(self.scale);
+        let whole = self.mantissa.to_big() / pow10(self.scale);
         i64::try_from(whole).ok()
+    }
+
+    /// Mantissa of `self` at `scale` (scale >= self.scale), as a BigInt.
+    /// Used by the once-per-summary derived statistics.
+    pub fn mantissa_at(&self, scale: u32) -> BigInt {
+        self.rescaled(scale).to_big()
+    }
+
+    #[cfg(test)]
+    fn is_small(&self) -> bool {
+        matches!(self.mantissa, Mant::Small(_))
     }
 }
 
@@ -182,19 +328,13 @@ impl Decimal {
         } else {
             (num.clone(), den.clone())
         };
-        Decimal {
-            mantissa: round_half_away(&(num * pow10(scale)), &den),
-            scale,
-        }
+        Decimal::new(round_half_away(&(num * pow10(scale)), &den), scale)
     }
 
     /// The rational `num / den` (den > 0) rounded up (toward +inf) to `scale` decimals.
     pub fn ratio_ceil(num: &BigInt, den: &BigInt, scale: u32) -> Decimal {
         debug_assert!(den.is_positive());
-        Decimal {
-            mantissa: (num * pow10(scale)).div_ceil(den),
-            scale,
-        }
+        Decimal::new((num * pow10(scale)).div_ceil(den), scale)
     }
 }
 
@@ -204,15 +344,7 @@ impl Decimal {
 pub fn ratio_sqrt_round2(num: &BigInt, den: &BigInt) -> Decimal {
     debug_assert!(!num.is_negative() && den.is_positive());
     let floor = (num * 40000u32) / den;
-    let mantissa = (floor.sqrt() + 1u8) / 2u8;
-    Decimal { mantissa, scale: 2 }
-}
-
-impl Decimal {
-    /// Mantissa of `self` at `scale` (scale >= self.scale).
-    pub fn mantissa_at(&self, scale: u32) -> BigInt {
-        self.rescaled(scale)
-    }
+    Decimal::new((floor.sqrt() + 1u8) / 2u8, 2)
 }
 
 impl FromStr for Decimal {
@@ -246,18 +378,19 @@ impl FromStr for Decimal {
         {
             return Err(err());
         }
-        // Fast path: up to 18 digits fit in an i64, no String allocation.
-        let mut mantissa = if int_part.len() + frac_part.len() <= 18 {
-            let n = int_part
-                .bytes()
-                .chain(frac_part.bytes())
-                .fold(0i64, |acc, b| acc * 10 + i64::from(b - b'0'));
-            BigInt::from(n)
+        // Up to 38 digits always fit in an i128: no allocation.
+        let mut mantissa = if int_part.len() + frac_part.len() <= 38 {
+            Mant::Small(
+                int_part
+                    .bytes()
+                    .chain(frac_part.bytes())
+                    .fold(0i128, |acc, b| acc * 10 + i128::from(b - b'0')),
+            )
         } else {
-            BigInt::from_str(&format!("{int_part}{frac_part}")).map_err(|_| err())?
+            Mant::from_big(BigInt::from_str(&format!("{int_part}{frac_part}")).map_err(|_| err())?)
         };
         if neg {
-            mantissa = -mantissa;
+            mantissa = mantissa.neg();
         }
         // value = digits * 10^(exp - frac_len); PostgreSQL keeps scale
         // max(0, frac_len - exp) for this input, which we mirror.
@@ -269,7 +402,7 @@ impl FromStr for Decimal {
             })
         } else {
             Ok(Decimal {
-                mantissa: mantissa * pow10((-scale) as u32),
+                mantissa: mantissa.scale_up((-scale) as u32),
                 scale: 0,
             })
         }
@@ -278,13 +411,12 @@ impl FromStr for Decimal {
 
 impl fmt::Display for Decimal {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let digits = self.mantissa.magnitude().to_str_radix(10);
-        let scale = self.scale as usize;
-        let sign = if self.mantissa.sign() == Sign::Minus {
-            "-"
-        } else {
-            ""
+        let (neg, digits) = match &self.mantissa {
+            Mant::Small(v) => (*v < 0, v.unsigned_abs().to_string()),
+            Mant::Big(b) => (b.is_negative(), b.magnitude().to_str_radix(10)),
         };
+        let sign = if neg { "-" } else { "" };
+        let scale = self.scale as usize;
         if scale == 0 {
             return write!(f, "{sign}{digits}");
         }
@@ -366,7 +498,6 @@ mod unit {
         assert!(r("2", "1", true) && !r("1", "2", true));
         assert!(r("1", "2", false) && !r("2", "1", false));
         assert!(r("-1", "-1.5", true) && !r("-1.5", "-1", true));
-        // parse fast path vs slow path agree
         assert_eq!(
             d("123456789012345678.9").to_string(),
             "123456789012345678.9"
@@ -398,6 +529,45 @@ mod unit {
         assert_eq!(
             ratio_sqrt_round2(&b(225), &b(1_000_000)).to_string(),
             "0.02"
+        );
+    }
+
+    #[test]
+    fn fast_path_promotes_and_demotes_exactly() {
+        let max = i128::MAX.to_string(); // 170141183460469231731687303715884105727
+                                         // parse: 38 digits small, 39 digits big unless it fits
+        assert!(d("99999999999999999999999999999999999999").is_small());
+        assert!(d(&max).is_small());
+        assert!(!d("170141183460469231731687303715884105728").is_small());
+        // add: overflow promotes, and the sum is exact
+        let s = d(&max).add(&d("1"));
+        assert!(!s.is_small());
+        assert_eq!(s.to_string(), "170141183460469231731687303715884105728");
+        // demotion: back in range becomes small again (canonical form)
+        let back = s.add(&d("-1"));
+        assert!(back.is_small());
+        assert_eq!(back, d(&max));
+        // mul: overflow promotes (13043817825332782213² > i128::MAX; ...212² fits)
+        assert!(d("13043817825332782212").square().is_small());
+        let sq = d("13043817825332782213").square();
+        assert!(!sq.is_small());
+        assert_eq!(sq.to_string(), "170141183460469231748655437451289177369");
+        // rescale overflow (scale gap) promotes
+        let r = d("1e20").add(&d("0.0000000000000000001"));
+        assert_eq!(r.to_string(), "100000000000000000000.0000000000000000001");
+        // i128::MIN negation and comparison across forms
+        let min = d(&i128::MIN.to_string());
+        assert!(min.is_small());
+        assert_eq!(
+            min.clone().negated().to_string(),
+            "170141183460469231731687303715884105728"
+        );
+        assert_eq!(d(&max).cmp_value(&s), Ordering::Less);
+        assert_eq!(s.cmp_value(&d(&max)), Ordering::Greater);
+        assert!(d("1e40").is_integral() && !d("1e40").is_small());
+        assert_eq!(
+            d("-170141183460469231731687303715884105729").to_string(),
+            "-170141183460469231731687303715884105729"
         );
     }
 }
