@@ -51,7 +51,7 @@ then recompute stored aggregates. See README "Upgrading".
 
 - `dev/exact_oracle.py`: independent Python rational-arithmetic oracle and
   fixture generator (73 rows, values 0..90,000,000, plus
-  negatives, near-i64::MAX, dec2 and float columns; 19 rounding/NULL edge
+  negatives, near-i64::MAX, dec2 and float columns; 25 rounding, NULL and i128-boundary edge
   cases). Cross-checked against PostgreSQL numeric with exact integer division.
 - `src/tests_exact.rs`: byte-identical output across row orders, groupings,
   merge orders, two-level merges, scalar folds and forced parallel plans,

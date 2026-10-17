@@ -29,11 +29,15 @@ import sys
 # ── exact decimal helpers: a decimal is (mantissa: int, scale: int >= 0) ──
 
 def parse(text):
-    d = Decimal(text)
-    sign, digits, exp = d.as_tuple()
-    scale = max(0, -exp)
-    mant = int(d.scaleb(scale))
-    return (mant, scale)
+    # Exact: Decimal(str) keeps every digit; only arithmetic is context-rounded,
+    # so take the digits/exponent tuple directly.
+    sign, digits, exp = Decimal(text).as_tuple()
+    mant = int("".join(map(str, digits)) or "0")
+    if sign:
+        mant = -mant
+    if exp >= 0:
+        return (mant * 10 ** exp, 0)
+    return (mant, -exp)
 
 
 def rescale(d, scale):
@@ -238,6 +242,13 @@ EDGE_CASES = [
     ("float_huge", "float", ["1e308", "-1e308"]),
     ("float_tiny", "float", ["0.000001", "0.000003"]),
     ("float_scale_tie", "float", ["2.5", "2.50"]),
+    # i128 boundary (|i128| < 1.7e38): squares, sums and rescales that overflow
+    ("i128_square_overflow", "int", ["13043817825332782212", "-13043817825332782212", "1"]),
+    ("i128_sum_sq_overflow_by_count", "int", ["9223372036854775807"] * 3),
+    ("i128_value_beyond", "int", ["170141183460469231731687303715884105728", "-1"]),
+    ("i128_dec2_large", "dec2", ["9999999999999999999.99", "0.01", "-9999999999999999999.99"]),
+    ("i128_float_rescale", "float", ["1e20", "0.0000000000000000001", "-1e20"]),
+    ("i128_float_38_digits", "float", ["1234567890123456789.0123456789012345678", "1"]),
 ]
 
 
