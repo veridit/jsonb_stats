@@ -1,7 +1,8 @@
 #!/bin/bash
 # Real upgrade test: install jsonb_stats 2.0.0 (from git ref $OLD_REF), store
 # aggregates, ALTER EXTENSION UPDATE to the working tree version, and check
-# that stored 2.x summaries are rejected and recompute cleanly.
+# that stored 2.x summaries keep working (sum_sq rebuilt on read) and that a
+# recompute gives the exact result.
 # Runs inside the jsonb-stats-builder image (see Dockerfile.builder):
 #   docker run --rm -v $PWD:/src_ro:ro --tmpfs /cache:exec,size=6g \
 #     jsonb-stats-builder bash /src_ro/dev/xarch/upgrade_test.sh
@@ -47,12 +48,20 @@ su postgres -c "/usr/lib/postgresql/18/bin/pg_ctl -D /pgdata -w stop >/dev/null"
 echo "== swap in 3.0.0 library and ALTER EXTENSION UPDATE"
 cp /tmp/jsonb_stats-3.so /usr/lib/postgresql/18/lib/jsonb_stats.so
 su postgres -c "/usr/lib/postgresql/18/bin/pg_ctl -D /pgdata -l /tmp/pg.log -w start >/dev/null"
-$P "psql -X -At" <<'EOF'
+$P "psql -X -At -v ON_ERROR_STOP=1" <<'EOF'
 ALTER EXTENSION jsonb_stats UPDATE;
 SELECT 'version: ' || extversion FROM pg_extension WHERE extname = 'jsonb_stats';
-SELECT 'merge of stored 2.x (expect error):';
-SELECT jsonb_stats_merge_agg(agg) FROM facet;
+-- Stored 2.x summaries keep working with no recompute (sum_sq rebuilt on read).
+CREATE TEMP TABLE before_refresh AS SELECT jsonb_stats_merge_agg(agg)->'n' AS r FROM facet;
+SELECT 'stored 2.x, merged:  ' || r::text FROM before_refresh;
+-- Incremental use on old data: merge in one new row without recomputing.
+SELECT 'stored 2.x + new row: ' || (jsonb_stats_merge(f.agg, jsonb_stats_to_agg('{"n":{"type":"int","value":10}}'))->'n')::text
+FROM facet f WHERE region = 'US';
 REFRESH MATERIALIZED VIEW facet;
-SELECT 'after REFRESH: ' || (jsonb_stats_merge_agg(agg)->'n')::text FROM facet;
-SELECT 'direct:        ' || (jsonb_stats_agg(stats)->'n')::text FROM src;
+SELECT 'after REFRESH:       ' || (jsonb_stats_merge_agg(agg)->'n')::text FROM facet;
+SELECT 'direct:              ' || (jsonb_stats_agg(stats)->'n')::text FROM src;
+SELECT 'CHECK legacy == exact here: ' ||
+       ((SELECT r FROM before_refresh) = (SELECT jsonb_stats_agg(stats)->'n' FROM src))::text;
+SELECT 'CHECK refresh == direct:    ' ||
+       ((SELECT jsonb_stats_merge_agg(agg)->'n' FROM facet) = (SELECT jsonb_stats_agg(stats)->'n' FROM src))::text;
 EOF

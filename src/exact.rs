@@ -171,14 +171,30 @@ fn round_half_away(num: &BigInt, den: &BigInt) -> BigInt {
 
 /// The rational `num / den` (den != 0) rounded to 2 decimals, half away from zero.
 pub fn ratio_round2(num: &BigInt, den: &BigInt) -> Decimal {
-    let (num, den) = if den.is_negative() {
-        (-num, -den)
-    } else {
-        (num.clone(), den.clone())
-    };
-    Decimal {
-        mantissa: round_half_away(&(num * 100u8), &den),
-        scale: 2,
+    Decimal::ratio_round(num, den, 2)
+}
+
+impl Decimal {
+    /// The rational `num / den` (den != 0) rounded to `scale` decimals, half away from zero.
+    pub fn ratio_round(num: &BigInt, den: &BigInt, scale: u32) -> Decimal {
+        let (num, den) = if den.is_negative() {
+            (-num, -den)
+        } else {
+            (num.clone(), den.clone())
+        };
+        Decimal {
+            mantissa: round_half_away(&(num * pow10(scale)), &den),
+            scale,
+        }
+    }
+
+    /// The rational `num / den` (den > 0) rounded up (toward +inf) to `scale` decimals.
+    pub fn ratio_ceil(num: &BigInt, den: &BigInt, scale: u32) -> Decimal {
+        debug_assert!(den.is_positive());
+        Decimal {
+            mantissa: (num * pow10(scale)).div_ceil(den),
+            scale,
+        }
     }
 }
 

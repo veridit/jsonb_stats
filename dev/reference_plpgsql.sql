@@ -34,6 +34,27 @@ AS $jsonb_stats_round2_ratio_plpgsql$
     SELECT (sign(a) * sign(b) * div(200 * abs(a) + abs(b), 2 * abs(b))) * 0.01
 $jsonb_stats_round2_ratio_plpgsql$;
 
+-- Round the rational a / b (b <> 0) to k decimals, half away from zero, at scale k.
+CREATE OR REPLACE FUNCTION jsonb_stats_round_ratio_plpgsql(a numeric, b numeric, k int)
+RETURNS numeric
+LANGUAGE sql IMMUTABLE STRICT
+AS $jsonb_stats_round_ratio_plpgsql$
+    SELECT round((sign(a) * sign(b) * div(2 * abs(a) * 10::numeric ^ k + abs(b), 2 * abs(b)))
+                 * ('1e-' || k)::numeric, k)  -- multiply: numeric division would round
+$jsonb_stats_round_ratio_plpgsql$;
+
+-- The rational a / b (b > 0) rounded up (toward +inf) to k decimals, at scale k.
+CREATE OR REPLACE FUNCTION jsonb_stats_ceil_ratio_plpgsql(a numeric, b numeric, k int)
+RETURNS numeric
+LANGUAGE sql IMMUTABLE STRICT
+AS $jsonb_stats_ceil_ratio_plpgsql$
+    -- ceil = floor + 1 when there is a remainder. Scale back by multiplying
+    -- (numeric division would round at a limited scale).
+    SELECT round((div(a * 10::numeric ^ k, b)
+                  + CASE WHEN mod(a * 10::numeric ^ k, b) > 0 THEN 1 ELSE 0 END)
+                 * ('1e-' || k)::numeric, k)
+$jsonb_stats_ceil_ratio_plpgsql$;
+
 -- Exact floor(sqrt(n)) for an integral numeric n >= 0 (Newton's method).
 CREATE OR REPLACE FUNCTION jsonb_stats_isqrt_plpgsql(n numeric)
 RETURNS numeric
@@ -123,25 +144,45 @@ AS $jsonb_stats_num_state_plpgsql$
 DECLARE
     agg_type text := summary->>'type';
     field text;
+    legacy boolean := NOT summary ? 'sum_sq';
+    k int;
+    sq_est numeric;
+    sq_floor numeric;
 BEGIN
-    IF NOT summary ? 'sum_sq' THEN
-        RAISE EXCEPTION 'jsonb_stats: % for key ''%'' lacks ''sum_sq'' (created by jsonb_stats < 3.0). Recompute it from the source stats.', agg_type, key;
+    IF legacy AND NOT summary ? 'sum_sq_diff' THEN
+        RAISE EXCEPTION 'jsonb_stats: % for key ''%'' has neither ''sum_sq'' nor ''sum_sq_diff''', agg_type, key;
     END IF;
     IF jsonb_typeof(summary->'count') IS DISTINCT FROM 'number'
        OR (summary->'count')::numeric < 1
        OR (summary->'count')::numeric <> trunc((summary->'count')::numeric) THEN
         RAISE EXCEPTION 'jsonb_stats: % for key ''%'' has invalid ''count'' (must be an integer >= 1)', agg_type, key;
     END IF;
-    FOREACH field IN ARRAY ARRAY['sum', 'sum_sq', 'min', 'max'] LOOP
+    FOREACH field IN ARRAY CASE WHEN legacy THEN ARRAY['sum', 'sum_sq_diff', 'min', 'max']
+                                ELSE ARRAY['sum', 'sum_sq', 'min', 'max'] END LOOP
         IF jsonb_typeof(summary->field) IS DISTINCT FROM 'number' THEN
             RAISE EXCEPTION 'jsonb_stats: % for key ''%'' has missing or non-numeric ''%''', agg_type, key, field;
         END IF;
     END LOOP;
     count_val := trunc((summary->'count')::numeric);
     sum_val := (summary->'sum')::numeric;
-    sum_sq_val := (summary->'sum_sq')::numeric;
     min_val := (summary->'min')::numeric;
     max_val := (summary->'max')::numeric;
+    IF NOT legacy THEN
+        sum_sq_val := (summary->'sum_sq')::numeric;
+    ELSE
+        -- jsonb_stats 2.x summary: upgrade on read. Normalize to the kind's
+        -- scale, then sum_sq = max(round_k(ssd + sum^2/n), ceil_k(sum^2/n)).
+        IF agg_type IN ('int_agg', 'nat_agg') THEN
+            sum_val := round(sum_val); min_val := round(min_val); max_val := round(max_val);
+        ELSIF agg_type = 'dec2_agg' THEN
+            sum_val := round(sum_val, 2); min_val := round(min_val, 2); max_val := round(max_val, 2);
+        END IF;
+        k := 2 * scale(sum_val);
+        sq_est := jsonb_stats_round_ratio_plpgsql(
+            (summary->'sum_sq_diff')::numeric * count_val + sum_val * sum_val, count_val, k);
+        sq_floor := jsonb_stats_ceil_ratio_plpgsql(sum_val * sum_val, count_val, k);
+        sum_sq_val := CASE WHEN sq_floor > sq_est THEN sq_floor ELSE sq_est END;
+    END IF;
     IF count_val * sum_sq_val < sum_val * sum_val THEN
         RAISE EXCEPTION 'jsonb_stats: % for key ''%'' is inconsistent (count * sum_sq < sum^2)', agg_type, key;
     END IF;
@@ -280,6 +321,16 @@ BEGIN
             RAISE EXCEPTION 'jsonb_stats: unknown stat type ''%''. Expected: int, float, dec2, nat, str, bool, arr, date', stat_type;
         END IF;
         new_state := jsonb_set(new_state, ARRAY[stat_key], new_summary, true);
+    END LOOP;
+    -- Numeric entries carry exact state only (also upgrades 2.x summaries
+    -- and drops stale derived fields from a finalized input state).
+    FOR stat_key, current_summary IN SELECT * FROM jsonb_each(new_state) LOOP
+        IF jsonb_typeof(current_summary) = 'object'
+           AND current_summary->>'type' IN ('int_agg', 'nat_agg', 'dec2_agg', 'float_agg') THEN
+            st := jsonb_stats_num_state_plpgsql(stat_key, current_summary);
+            new_state := jsonb_set(new_state, ARRAY[stat_key], jsonb_stats_num_state_obj_plpgsql(
+                current_summary->>'type', st.count_val, st.sum_val, st.sum_sq_val, st.min_val, st.max_val));
+        END IF;
     END LOOP;
     RETURN new_state;
 END;

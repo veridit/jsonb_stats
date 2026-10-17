@@ -143,14 +143,22 @@ impl NumFields {
 
     /// Parse the exact state of a numeric *_agg JSON summary. Derived fields
     /// (mean, variance, ...) are ignored; they are always recomputed.
+    ///
+    /// Summaries written by jsonb_stats 2.x have no `sum_sq`. They are upgraded
+    /// on read: `sum`/`min`/`max` are normalized to the kind's scale and
+    /// `sum_sq` is rebuilt as well as possible from `sum_sq_diff`:
+    ///
+    /// ```text
+    /// sum_sq = max(round_k(sum_sq_diff + sum²/count), ceil_k(sum²/count))
+    /// ```
+    ///
+    /// at the scale k that sum_sq has for that kind (0 for int/nat, 4 for
+    /// dec2, 2·scale(sum) for float). For int/nat the true value is an integer,
+    /// so it is recovered exactly whenever the stored error is below 0.5. The
+    /// lower bound keeps the state consistent. Recomputing from source data
+    /// makes it exact.
     pub fn from_summary(kind: NumKind, key: &str, obj: &Map<String, Value>) -> Self {
         let agg = kind.agg_type();
-        if !obj.contains_key("sum_sq") {
-            pgrx::error!(
-                "jsonb_stats: {} for key '{}' lacks 'sum_sq' (created by jsonb_stats < 3.0). Recompute it from the source stats.",
-                agg, key
-            );
-        }
         let count = match obj.get("count") {
             Some(Value::Number(n)) => Decimal::from_str(n.as_str())
                 .ok()
@@ -177,12 +185,29 @@ impl NumFields {
                 ),
             }
         };
-        let f = NumFields {
-            count,
-            sum: field("sum"),
-            sum_sq: field("sum_sq"),
-            min: field("min"),
-            max: field("max"),
+        let f = if obj.contains_key("sum_sq") {
+            NumFields {
+                count,
+                sum: field("sum"),
+                sum_sq: field("sum_sq"),
+                min: field("min"),
+                max: field("max"),
+            }
+        } else if obj.contains_key("sum_sq_diff") {
+            Self::from_legacy(
+                kind,
+                count,
+                field("sum"),
+                &field("sum_sq_diff"),
+                field("min"),
+                field("max"),
+            )
+        } else {
+            pgrx::error!(
+                "jsonb_stats: {} for key '{}' has neither 'sum_sq' nor 'sum_sq_diff'",
+                agg,
+                key
+            )
         };
         if f.n_big().is_negative() {
             pgrx::error!(
@@ -192,6 +217,47 @@ impl NumFields {
             );
         }
         f
+    }
+
+    /// Best-effort state from a 2.x summary (see [`NumFields::from_summary`]).
+    fn from_legacy(
+        kind: NumKind,
+        count: i64,
+        sum: Decimal,
+        sum_sq_diff: &Decimal,
+        min: Decimal,
+        max: Decimal,
+    ) -> Self {
+        // 2.x stored f64-derived values; bring them to the kind's canonical scale.
+        let canon = |d: Decimal| match kind {
+            NumKind::Int | NumKind::Nat => d.round_to(0),
+            NumKind::Dec2 => d.round_to(2),
+            NumKind::Float => d,
+        };
+        let (sum, min, max) = (canon(sum), canon(min), canon(max));
+        let k = 2 * sum.scale();
+        // sum_sq ≈ sum_sq_diff + sum² / count, as an exact rational num / den.
+        let n = BigInt::from(count);
+        let ssd_scale = sum_sq_diff.scale().max(k);
+        let ten = |p: u32| num_traits::pow(BigInt::from(10u8), p as usize);
+        // Everything at denominator count · 10^ssd_scale.
+        let sum2 = sum.square().mantissa_at(ssd_scale); // sum² · 10^ssd_scale
+        let num = &n * sum_sq_diff.mantissa_at(ssd_scale) + &sum2;
+        let den = &n * ten(ssd_scale);
+        let floor_bound = Decimal::ratio_ceil(&sum2, &den, k);
+        let estimate = Decimal::ratio_round(&num, &den, k);
+        let sum_sq = if estimate.replaced_by(&floor_bound, false) {
+            floor_bound
+        } else {
+            estimate
+        };
+        NumFields {
+            count,
+            sum,
+            sum_sq,
+            min,
+            max,
+        }
     }
 
     /// Exact integers for the derived formulas: returns (N, S1, s) where the
