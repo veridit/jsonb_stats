@@ -42,6 +42,19 @@ INSERT INTO src VALUES ('EU','{"n":{"type":"int","value":150}}'),
                        ('US','{"n":{"type":"int","value":2500}}');
 CREATE MATERIALIZED VIEW facet AS SELECT region, jsonb_stats_agg(stats) AS agg FROM src GROUP BY region;
 SELECT 'v2 stored has sum_sq: ' || (agg->'n' ? 'sum_sq') FROM facet WHERE region = 'EU';
+-- Larger, realistic 2.x data: all numeric types, wide magnitudes, and 2.x
+-- merge_agg outputs (lossy in 2.x) stored as a second level.
+SELECT setseed(0.42);
+CREATE TABLE big_src AS
+SELECT i, (i % 40) AS grp, jsonb_build_object(
+    'turnover', jsonb_build_object('type', 'int', 'value', floor(random() * 90000000)::bigint),
+    'staff',    jsonb_build_object('type', 'nat', 'value', floor(random() * 5000)::int),
+    'price',    jsonb_build_object('type', 'dec2', 'value', round((random() * 100000)::numeric, 2)),
+    'ratio',    jsonb_build_object('type', 'float', 'value', random() * 1000)
+) AS stats
+FROM generate_series(1, 20000) AS i;
+CREATE TABLE big_l2 AS SELECT grp, jsonb_stats_agg(stats) AS agg FROM big_src GROUP BY grp;
+CREATE TABLE big_l3 AS SELECT grp % 4 AS region, jsonb_stats_merge_agg(agg) AS agg FROM big_l2 GROUP BY 1;
 EOF
 su postgres -c "/usr/lib/postgresql/18/bin/pg_ctl -D /pgdata -w stop >/dev/null"
 
@@ -64,4 +77,22 @@ SELECT 'CHECK legacy == exact here: ' ||
        ((SELECT r FROM before_refresh) = (SELECT jsonb_stats_agg(stats)->'n' FROM src))::text;
 SELECT 'CHECK refresh == direct:    ' ||
        ((SELECT jsonb_stats_merge_agg(agg)->'n' FROM facet) = (SELECT jsonb_stats_agg(stats)->'n' FROM src))::text;
+-- Large legacy data: every stored 2.x level must be accepted; count/sum/min/max
+-- exact; derived fields within a tight relative tolerance of the exact result.
+CREATE TEMP TABLE exact AS SELECT jsonb_stats_agg(stats) AS a FROM big_src;
+CREATE TEMP TABLE from_l2 AS SELECT jsonb_stats_merge_agg(agg) AS a FROM big_l2;
+CREATE TEMP TABLE from_l3 AS SELECT jsonb_stats_merge_agg(agg) AS a FROM big_l3;
+SELECT 'LEGACY ' || lvl || ' ' || k || ': '
+    || 'count/min/max ' || CASE WHEN (l.a->k->'count', l.a->k->'min', l.a->k->'max') = (e.a->k->'count', e.a->k->'min', e.a->k->'max') THEN 'ok' ELSE 'DIFF' END
+    || ', sum ' || CASE WHEN abs((l.a->k->>'sum')::numeric - (e.a->k->>'sum')::numeric) <= 1e-6 * greatest(1, abs((e.a->k->>'sum')::numeric)) THEN 'ok' ELSE 'DIFF' END
+    || ', stddev rel err ' || to_char(abs((l.a->k->>'stddev')::numeric / (e.a->k->>'stddev')::numeric - 1), 'FM0.0000000000')
+    || ', mean ' || CASE WHEN l.a->k->'mean' = e.a->k->'mean' THEN 'equal' ELSE 'differs' END
+FROM (SELECT 'L2' AS lvl, a FROM from_l2 UNION ALL SELECT 'L3', a FROM from_l3) l, exact e,
+     unnest(ARRAY['turnover', 'staff', 'price', 'ratio']) AS k
+ORDER BY lvl, k;
+SELECT 'CHECK legacy stddev within 1e-6: ' || bool_and(abs((l.a->k->>'stddev')::numeric / (e.a->k->>'stddev')::numeric - 1) < 1e-6)::text
+FROM (SELECT a FROM from_l2 UNION ALL SELECT a FROM from_l3) l, exact e, unnest(ARRAY['turnover', 'staff', 'price', 'ratio']) AS k;
+-- After recompute from source, everything is exact again.
+CREATE TEMP TABLE re_l2 AS SELECT grp, jsonb_stats_agg(stats) AS agg FROM big_src GROUP BY grp;
+SELECT 'CHECK recomputed == exact: ' || ((SELECT jsonb_stats_merge_agg(agg) FROM re_l2) = (SELECT a FROM exact))::text;
 EOF
