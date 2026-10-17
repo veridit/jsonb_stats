@@ -400,10 +400,10 @@ The Rust implementation (via pgrx) uses native `HashMap` state with `Box` heap a
 
 | Benchmark | Rust | PL/pgSQL | Speedup |
 |-----------|------|----------|---------|
-| `jsonb_stats_agg` — 10K rows, 3 types | 33–45ms | 16,701–17,855ms | **393–511x** |
-| `jsonb_stats_merge_agg` — 1K groups | 110–120ms | 1,090,917–1,110,045ms | **9,098–10,116x** |
+| `jsonb_stats_agg` — 10K rows, 3 types | 30–45ms | 16,701–19,399ms | **393–655x** |
+| `jsonb_stats_merge_agg` — 1K groups | 110–122ms | 1,090,917–1,224,139ms | **9,098–10,116x** |
 
-(Apple M-series, PostgreSQL 18, jsonb_stats 3.0, two full suite runs; the 10K-row timing is noisy at this size.) The merge speedup is larger because PL/pgSQL performs full JSONB serialization round-trips per group, while Rust merges native structs and only serializes once in the finalfunc.
+(Apple M-series, PostgreSQL 18, jsonb_stats 3.0, three full suite runs; the 10K-row timing is noisy at this size.) The merge speedup is larger because PL/pgSQL performs full JSONB serialization round-trips per group, while Rust merges native structs and only serializes once in the finalfunc.
 
 Exact arithmetic costs little. Values are held in 128-bit integers and switch to arbitrary precision only when a number outgrows 38 digits. Per 1M rows, compared with the earlier f64 implementation:
 - `str`: unchanged
@@ -524,7 +524,7 @@ If you build from source, pin a release tag or commit, and bump it when you are 
 The SQL interface is unchanged, so `ALTER EXTENSION jsonb_stats UPDATE` works (the upgrade script is a no-op). The **stored data format** did change:
 
 - **No recompute needed.** Numeric `*_agg` objects gain a `sum_sq` field. Summaries written by 2.x don't have it, so it is rebuilt when they are read, from the stored `count`, `sum` and `sum_sq_diff` (`sum_sq ≈ sum_sq_diff + sum²/count`). Stored aggregates keep working: they can be merged with new data, finalized and stored again (now with `sum_sq`).
-  - For `int`/`nat` the rebuilt value is exact whenever the old `sum_sq_diff` was within 0.5 of the truth, which holds for typical data.
+  - For `int`/`nat` the rebuilt value is exact whenever the old `sum_sq_diff` was within 0.5 of the truth. That holds for small aggregates (few rows, or values up to roughly 1e6). It does not hold for large ones: 2.x kept `sum_sq_diff` in f64, so with 73 values near 9e7 it was off by about 14, and the rebuilt `sum_sq` is off by the same amount.
   - For `dec2`/`float`, and for 2.x aggregates that were themselves merged (2.x merges were lossy), the rebuilt value is a best estimate. Derived statistics may then differ from an exact recompute in the last digits.
   - Results become exact, and fully order- and machine-independent, the next time the aggregates are recomputed from their source `stats`, e.g. at the next data load or with `REFRESH MATERIALIZED VIEW`. There is no flag, and no need to recompute everything at upgrade time.
 - **Expected outputs change.** Results are now exact, so these fields change in their last digits:

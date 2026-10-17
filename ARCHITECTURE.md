@@ -123,7 +123,7 @@ Benchmarks (Rust vs PL/pgSQL reference):
 
 | Benchmark | Rust | PL/pgSQL | Speedup |
 |-----------|------|----------|---------|
-| `jsonb_stats_agg` — 10K rows, 3 types | 33–45ms | 16,701–17,855ms | **393–511x** |
-| `jsonb_stats_merge_agg` — 1K groups | 110–120ms | 1,090,917–1,110,045ms | **9,098–10,116x** |
+| `jsonb_stats_agg` — 10K rows, 3 types | 30–45ms | 16,701–19,399ms | **393–655x** |
+| `jsonb_stats_merge_agg` — 1K groups | 110–122ms | 1,090,917–1,224,139ms | **9,098–10,116x** |
 
 The merge speedup is larger because PL/pgSQL performs full JSONB serialization round-trips per group, while Rust merges native structs and only serializes once in the finalfunc.

@@ -23,8 +23,9 @@ See README "Upgrading".
 
 - Numeric `*_agg` summaries carry a new field `sum_sq` (sum of squares).
   2.x summaries lack it; it is rebuilt on read from `count`, `sum` and
-  `sum_sq_diff` (exact for `int`/`nat` in the common case, best effort
-  otherwise). No flag; the next recompute from source stats is exact.
+  `sum_sq_diff` (exact for `int`/`nat` aggregates with small values or few
+  rows, best effort otherwise). No flag; the next recompute from source
+  stats is exact.
 - State is exact (`count, sum, sum_sq, min, max` as arbitrary-precision
   decimals); every derived field is computed exactly and rounded once to
   2 decimals, half away from zero. Stored statistics change in their last
@@ -58,13 +59,13 @@ See README "Upgrading".
   cases). Cross-checked against PostgreSQL numeric with exact integer division.
 - `src/tests_exact.rs`: byte-identical output across row orders, groupings,
   merge orders, two-level merges, scalar folds and forced parallel plans,
-  plus reference parity. Full suite: 96 pg_tests + unit tests pass.
+  plus reference parity. Full suite: 99 pg_tests + unit tests pass.
 - Cross-architecture (`make xarch`, `dev/xarch/`, `dev/xarch_checks*.sql`):
   the same 10 checks give identical output and md5 on macOS arm64,
   Linux arm64 and Linux amd64 (x86_64 build cross-compiled, run under
   emulation). Fixture output md5 `6a5ccf0d8485ceaf6debc2d615874145`.
 - `make fixture-check` fails if the committed oracle fixture is stale.
-- Benchmarks still far ahead of the reference (393-511x accumulate,
+- Benchmarks still far ahead of the reference (393-655x accumulate,
   9,098-10,116x merge). Against 2.x per 1M rows, with an i128 fast path
   that falls back to BigInt: `str` unchanged, `int` at parity (950 vs
   915 ms), `float` with 16-17 digit values about 20% slower (1350 vs
