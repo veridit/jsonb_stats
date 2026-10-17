@@ -100,7 +100,8 @@ fn test_exact_scalar_merge_and_to_agg() {
     // README incremental pattern: jsonb_stats_merge(existing, jsonb_stats_to_agg(row))
     load_exact_fixture();
     let expected = expected_fixture_text();
-    let halves = "WITH odd AS (SELECT jsonb_stats_agg(stats) AS a FROM exact_fixture WHERE i % 2 = 1),
+    let halves =
+        "WITH odd AS (SELECT jsonb_stats_agg(stats) AS a FROM exact_fixture WHERE i % 2 = 1),
                   even AS (SELECT jsonb_stats_agg(stats) AS a FROM exact_fixture WHERE i % 2 = 0)";
     let ab = sql_text(&format!(
         "{halves} SELECT jsonb_stats_merge(odd.a, even.a)::text FROM odd, even"
@@ -335,8 +336,7 @@ fn test_exact_legacy_sum_sq_rebuilt() {
 
 #[pg_test]
 fn test_exact_legacy_accepted_everywhere() {
-    let fresh =
-        r#"{"x": {"type": "int_agg", "count": 1, "sum": 2500, "sum_sq": 6250000, "min": 2500, "max": 2500}}"#;
+    let fresh = r#"{"x": {"type": "int_agg", "count": 1, "sum": 2500, "sum_sq": 6250000, "min": 2500, "max": 2500}}"#;
     // 50, 150 (legacy) + 2500 (fresh) == the exact 3-row summary
     let want = r#"{"x": {"max": 2500, "min": 50, "sum": 2700, "mean": 900.00, "type": "int_agg", "count": 3, "stddev": 1386.54, "sum_sq": 6275000, "variance": 1922500.00, "sum_sq_diff": 3845000.00, "coefficient_of_variation_pct": 154.06}, "type": "stats_agg"}"#;
     for query in [
@@ -350,7 +350,9 @@ fn test_exact_legacy_accepted_everywhere() {
         assert_eq!(sql_text(&query), want, "{query}");
     }
     // Once rewritten, the summary carries sum_sq and is stable.
-    let once = sql_text(&format!("SELECT jsonb_stats_final('{LEGACY_INT_AGG}')::text"));
+    let once = sql_text(&format!(
+        "SELECT jsonb_stats_final('{LEGACY_INT_AGG}')::text"
+    ));
     let twice = sql_text(&format!(
         "SELECT jsonb_stats_final(jsonb_stats_final('{LEGACY_INT_AGG}'))::text"
     ));
@@ -370,8 +372,7 @@ fn test_exact_legacy_without_sum_sq_diff_rejected() {
 #[pg_test]
 fn test_exact_legacy_reference_parity() {
     load_plpgsql_reference();
-    let fresh =
-        r#"{"x": {"type": "int_agg", "count": 1, "sum": 2500, "sum_sq": 6250000, "min": 2500, "max": 2500}}"#;
+    let fresh = r#"{"x": {"type": "int_agg", "count": 1, "sum": 2500, "sum_sq": 6250000, "min": 2500, "max": 2500}}"#;
     let legacies = [
         LEGACY_INT_AGG,
         r#"{"x": {"type": "int_agg", "count": 73, "sum": 3554078835, "min": 0, "max": 90000000, "mean": 48686011.44, "sum_sq_diff": 72475317361765168.00}}"#,
@@ -618,6 +619,80 @@ fn test_exact_accum_rejects_type_change_for_key() {
     );
 }
 
+// ── Randomized end-to-end: Rust == reference, any grouping, parallel ──
+
+#[pg_test]
+fn test_exact_randomized_parity_and_determinism() {
+    load_plpgsql_reference();
+    // 3000 seeded rows with wide magnitudes and scales per type; some keys
+    // are missing in some rows. setseed makes it reproducible.
+    Spi::run(
+        "SELECT setseed(0.3006);
+         CREATE TEMP TABLE rnd AS
+         SELECT i, jsonb_strip_nulls(jsonb_build_object(
+             'i', CASE WHEN random() < 0.9 THEN jsonb_build_object('type', 'int',
+                    'value', (floor((random() - 0.5) * 10 ^ (1 + floor(random() * 19))))::numeric) END,
+             'n', jsonb_build_object('type', 'nat', 'value', floor(random() * 10 ^ floor(random() * 12))::numeric),
+             'd', CASE WHEN random() < 0.8 THEN jsonb_build_object('type', 'dec2',
+                    'value', round(((random() - 0.5) * 10 ^ floor(random() * 15))::numeric, floor(random() * 3)::int)) END,
+             'f', jsonb_build_object('type', 'float',
+                    'value', ((random() - 0.5) * 10 ^ (floor(random() * 40) - 20))::float8),
+             's', jsonb_build_object('type', 'str', 'value', 'v' || floor(random() * 5)::text)
+         )) AS stats
+         FROM generate_series(1, 3000) AS i;
+         ANALYZE rnd",
+    )
+    .unwrap();
+
+    let rust = sql_text("SELECT jsonb_stats_agg(stats ORDER BY i)::text FROM rnd");
+    let reference = sql_text("SELECT jsonb_stats_agg_plpgsql(stats ORDER BY i)::text FROM rnd");
+    assert_eq!(rust, reference, "Rust vs PL/pgSQL reference");
+
+    for (label, q) in [
+        (
+            "desc",
+            "SELECT jsonb_stats_agg(stats ORDER BY i DESC)::text FROM rnd".to_string(),
+        ),
+        (
+            "shuffled",
+            "SELECT jsonb_stats_agg(stats ORDER BY md5(i::text))::text FROM rnd".to_string(),
+        ),
+        (
+            "merge mod 17",
+            "SELECT jsonb_stats_merge_agg(a ORDER BY g DESC)::text FROM
+               (SELECT i % 17 AS g, jsonb_stats_agg(stats) AS a FROM rnd GROUP BY 1) t"
+                .to_string(),
+        ),
+        (
+            "two-level",
+            "WITH f AS (SELECT i % 50 AS g, jsonb_stats_agg(stats) AS a FROM rnd GROUP BY 1),
+                  r AS (SELECT g % 7 AS h, jsonb_stats_merge_agg(a) AS a FROM f GROUP BY 1)
+             SELECT jsonb_stats_merge_agg(a ORDER BY h)::text FROM r"
+                .to_string(),
+        ),
+        (
+            "reference merge mod 17",
+            "SELECT jsonb_stats_merge_agg_plpgsql(a)::text FROM
+               (SELECT i % 17 AS g, jsonb_stats_agg_plpgsql(stats) AS a FROM rnd GROUP BY 1) t"
+                .to_string(),
+        ),
+    ] {
+        assert_eq!(sql_text(&q), rust, "{label}");
+    }
+
+    Spi::run(
+        "SET parallel_setup_cost = 0; SET parallel_tuple_cost = 0;
+         SET min_parallel_table_scan_size = 0; SET max_parallel_workers_per_gather = 4;
+         SET debug_parallel_query = regress",
+    )
+    .unwrap();
+    assert_eq!(
+        sql_text("SELECT jsonb_stats_agg(stats)::text FROM rnd"),
+        rust,
+        "parallel plan"
+    );
+}
+
 // ── Reference parity: Rust and PL/pgSQL produce identical bytes ──
 
 #[pg_test]
@@ -626,15 +701,14 @@ fn test_exact_reference_parity() {
     load_exact_fixture();
     let expected = expected_fixture_text();
 
-    let reference_agg = sql_text(
-        "SELECT jsonb_stats_agg_plpgsql(stats ORDER BY i DESC)::text FROM exact_fixture",
-    );
+    let reference_agg =
+        sql_text("SELECT jsonb_stats_agg_plpgsql(stats ORDER BY i DESC)::text FROM exact_fixture");
     assert_eq!(reference_agg, expected, "reference agg vs oracle");
 
     let reference_merge = sql_text(
-    "SELECT jsonb_stats_merge_agg_plpgsql(a)::text FROM (
+        "SELECT jsonb_stats_merge_agg_plpgsql(a)::text FROM (
          SELECT i % 7 AS g, jsonb_stats_agg_plpgsql(stats) AS a FROM exact_fixture GROUP BY 1) t",
-);
+    );
     assert_eq!(reference_merge, expected, "reference merge_agg vs oracle");
 
     // Low-level functions, step by step
