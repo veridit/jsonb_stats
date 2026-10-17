@@ -55,12 +55,6 @@ impl Mant {
         }
     }
 
-    fn add(&self, o: &Mant) -> Mant {
-        let mut out = self.clone();
-        out.add_assign(o);
-        out
-    }
-
     /// In place, without cloning a BigInt accumulator (the hot path once a
     /// running sum has outgrown i128).
     fn add_assign(&mut self, o: &Mant) {
