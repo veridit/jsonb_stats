@@ -2,9 +2,9 @@
 
 ## 3.0.0
 
-Numeric aggregates are now exact and deterministic. Reported by StatBus
-(test 306): the same rows produced different `sum_sq_diff`, `variance`,
-`stddev` and `coefficient_of_variation_pct` on different machines and merge
+Numeric aggregates are now exact and deterministic. Previously the same rows
+could produce different `sum_sq_diff`, `variance`, `stddev` and
+`coefficient_of_variation_pct` on different machines and in different merge
 orders.
 
 Root causes (both in 2.x Rust and the 2.x PL/pgSQL reference):
@@ -13,9 +13,12 @@ Root causes (both in 2.x Rust and the 2.x PL/pgSQL reference):
   associative;
 - merges read the *finalized* `mean`, rounded to 2 decimals, so
   `jsonb_stats_merge_agg` was off by orders of magnitude more than f64 noise
-  (2.4e9 in `sum_sq_diff` on a 73-row StatBus-like fixture).
+  (2.4e9 in `sum_sq_diff` on a 73-row test set).
 
 ### Breaking
+
+Upgrade with `ALTER EXTENSION jsonb_stats UPDATE` (SQL interface unchanged),
+then recompute stored aggregates. See README "Upgrading".
 
 - Numeric `*_agg` summaries carry a new required field `sum_sq` (sum of
   squares). Summaries from 2.x are rejected; recompute them from source stats.
@@ -47,7 +50,7 @@ Root causes (both in 2.x Rust and the 2.x PL/pgSQL reference):
 ### Verification
 
 - `dev/exact_oracle.py`: independent Python rational-arithmetic oracle and
-  fixture generator (73-row StatBus-like fixture, turnover 0..90,000,000, plus
+  fixture generator (73 rows, values 0..90,000,000, plus
   negatives, near-i64::MAX, dec2 and float columns; 19 rounding/NULL edge
   cases). Cross-checked against PostgreSQL numeric with exact integer division.
 - `src/tests_exact.rs`: byte-identical output across row orders, groupings,

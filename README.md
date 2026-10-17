@@ -493,17 +493,46 @@ The extension follows a **fail-fast** strategy. Invalid input raises a PostgreSQ
 - **Malformed numeric summary** (`count` not an integer >= 1, non-numeric state field, `count * sum_sq < sum²`) → `ERROR`
 - **`stat()` of NaN or ±Infinity** → `ERROR: stat() cannot represent non-finite value`
 
-## Upgrading from 2.x
+## Upgrading
 
-Version 3.0 changes the numeric summary format, so stored `stats_agg` values must be recomputed. There is no `ALTER EXTENSION ... UPDATE` script: drop and re-create the extension (`DROP EXTENSION jsonb_stats CASCADE; CREATE EXTENSION jsonb_stats;`), then rebuild dependent objects and stored aggregates.
+### General procedure
 
-- Numeric `*_agg` objects gain a required `sum_sq` field. Summaries written by 2.x lack it and are rejected by every merge/final function, because the exact state cannot be recovered from them. Recompute stored aggregates from their source `stats` (e.g. refresh the materialized views that hold them).
-- Results become exact, so stored statistics change in their last digits: `sum_sq_diff`, `variance`, `stddev`, `coefficient_of_variation_pct` (and `mean` where 2.x merges used the rounded mean). `float_agg` sums are now decimal-exact (`0.1 + 0.2 = 0.3`).
-- `dec2_agg` prints `sum`/`min`/`max` with 2 decimals and `sum_sq` with 4.
-- `jsonb_stats_merge` now returns a finalized `stats_agg` (with `"type": "stats_agg"` and all derived fields). `jsonb_stats_accum` returns only exact state fields for numeric keys.
-- `stat()` now maps `smallint`/`bigint` to `int`, `real` to `float`, arrays to `arr`, and rounds `numeric` to 2 decimals.
-- Previously silent problems now raise errors: non-integral `int`/`nat` values, `dec2` values with more than 2 decimals, non-numeric numeric values, and a key changing stat type between rows.
-- The type-mismatch error message changed to `type mismatch for key '<key>': existing <a> vs incoming <b>`.
+Each release ships the full install script (`jsonb_stats--<version>.sql`). Where a previous release exists, it also ships an upgrade script (`sql/jsonb_stats--<old>--<new>.sql`). To upgrade an existing database:
+
+1. Install the new release's files (`make install`, `cargo pgrx install --release`, or your package). This replaces the shared library and adds the new SQL scripts next to the old ones.
+2. Reconnect (or restart PostgreSQL) so that sessions load the new library.
+3. In each database that uses the extension:
+   ```sql
+   ALTER EXTENSION jsonb_stats UPDATE;          -- to default_version
+   SELECT extversion FROM pg_extension WHERE extname = 'jsonb_stats';
+   ```
+4. Follow the release-specific notes below (for example, recompute stored aggregates).
+
+If you build from source, pin a release tag or commit, and bump it when you are ready to upgrade. Read the notes for every version you skip.
+
+`make upgrade-test` (needs Docker) checks the upgrade path end to end:
+- it installs the previous release and stores aggregates in a materialized view
+- it runs `ALTER EXTENSION jsonb_stats UPDATE`
+- it verifies that the stored summaries are rejected before recomputation and correct after it
+
+### 2.x to 3.0
+
+The SQL interface is unchanged, so `ALTER EXTENSION jsonb_stats UPDATE` works (the upgrade script is a no-op). The **stored data format** did change:
+
+- **Recompute stored aggregates.** Numeric `*_agg` objects gain a required `sum_sq` field. Summaries written by 2.x lack it, and every merge/final function rejects them (`... lacks 'sum_sq' (created by jsonb_stats < 3.0)`) because the exact state cannot be recovered from them. Rebuild them from their source `stats`, e.g. with `REFRESH MATERIALIZED VIEW` or by re-running the `INSERT ... SELECT jsonb_stats_agg(...)` that produced them. Aggregates computed on the fly need nothing.
+- **Expected outputs change.** Results are now exact, so these fields change in their last digits:
+  - `sum_sq_diff`, `variance`, `stddev` and `coefficient_of_variation_pct`
+  - `mean`, where 2.x merges used the rounded mean
+
+  Regression tests that print statistics must be re-recorded once. `float_agg` sums are decimal-exact (`0.1 + 0.2 = 0.3`). `dec2_agg` prints `sum`/`min`/`max` with 2 decimals and `sum_sq` with 4.
+- **Function results.** `jsonb_stats_merge` returns a finalized `stats_agg`, with `"type": "stats_agg"` and all derived fields. As a result, `jsonb_stats_merge('{}','{}')` now returns `{"type": "stats_agg"}`. `jsonb_stats_accum` returns only the exact state fields for numeric keys.
+- **`stat()` mapping.** `smallint`/`bigint` map to `int`, `real` maps to `float`, arrays map to `arr`, and `numeric` is rounded to 2 decimals. NaN and ±Infinity raise an error.
+- **New errors** for input that 2.x accepted silently:
+  - non-integral `int`/`nat` values
+  - `dec2` values with more than 2 decimals
+  - non-numeric values for numeric stats
+  - a key changing stat type between rows
+- The type-mismatch message is now `type mismatch for key '<key>': existing <a> vs incoming <b>`.
 
 ## Installation
 

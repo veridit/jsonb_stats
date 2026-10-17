@@ -17,6 +17,7 @@ make test        # Run all tests (pg_tests: correctness + exactness + error hand
 make test PG_VERSION="pg18 test_exact"   # Only the exactness/determinism suite (fast)
 make fixture-check   # Fail if dev/fixtures/exact_fixture.sql is stale (make fixture regenerates)
 make xarch           # Docker: identical output on linux amd64 and arm64
+make upgrade-test    # Docker: previous release -> ALTER EXTENSION UPDATE -> verify
 make run         # Launch psql with extension loaded
 make install     # Install into system PostgreSQL
 make package     # Build installable package
@@ -76,6 +77,10 @@ Follow a hypothesis-driven cycle:
 6. Update `todo.md` with outcomes
 
 When repeated iterations fail, switch to **simplify and rebuild**: strip to a non-crashing stub, verify stability, then incrementally re-introduce logic (logical binary search) to isolate the root cause.
+
+## Releases
+
+Every version bump in `Cargo.toml` needs `sql/jsonb_stats--<prev>--<new>.sql`, so `ALTER EXTENSION jsonb_stats UPDATE` works. pgrx copies these into the extension dir. Diff the generated schema between the two versions (`cargo pgrx schema`) and put any CREATE/DROP/ALTER in the script. Keep the script even when it is empty. Add a "X to Y" section to README "Upgrading", and run `make upgrade-test`.
 
 ## Git Setup
 

@@ -1,0 +1,7 @@
+-- jsonb_stats 2.0.0 -> 3.0.0
+--
+-- The SQL interface (functions, aggregates, signatures) is unchanged; only the
+-- shared library's behaviour changed. ALTER EXTENSION jsonb_stats UPDATE just
+-- records the new version. The data format did change: numeric *_agg values
+-- stored by 2.x lack "sum_sq" and must be recomputed from their source stats.
+-- See README.md "Upgrading".

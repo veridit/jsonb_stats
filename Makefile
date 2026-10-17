@@ -7,7 +7,14 @@ export BINDGEN_EXTRA_CLANG_ARGS
 PG_VERSION ?= pg18
 SHELL := /bin/bash
 
-.PHONY: test test-crash run install package fixture fixture-check xarch
+.PHONY: test test-crash run install package fixture fixture-check xarch upgrade-test
+
+# Real upgrade test (needs Docker): install 2.0.0, store aggregates,
+# ALTER EXTENSION UPDATE to this tree, verify rejection + recompute.
+upgrade-test:
+	docker build --platform linux/arm64 -t jsonb-stats-builder -f dev/xarch/Dockerfile.builder dev/xarch
+	docker run --rm --platform linux/arm64 -v $(CURDIR):/src_ro:ro --tmpfs /cache:exec,size=8g \
+		jsonb-stats-builder bash /src_ro/dev/xarch/upgrade_test.sh
 
 test:
 	cargo pgrx test $(PG_VERSION)
