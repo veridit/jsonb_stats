@@ -17,11 +17,14 @@ Root causes (both in 2.x Rust and the 2.x PL/pgSQL reference):
 
 ### Breaking
 
-Upgrade with `ALTER EXTENSION jsonb_stats UPDATE` (SQL interface unchanged),
-then recompute stored aggregates. See README "Upgrading".
+Upgrade with `ALTER EXTENSION jsonb_stats UPDATE` (SQL interface unchanged).
+Stored 2.x aggregates keep working; they become exact when next recomputed.
+See README "Upgrading".
 
-- Numeric `*_agg` summaries carry a new required field `sum_sq` (sum of
-  squares). Summaries from 2.x are rejected; recompute them from source stats.
+- Numeric `*_agg` summaries carry a new field `sum_sq` (sum of squares).
+  2.x summaries lack it; it is rebuilt on read from `count`, `sum` and
+  `sum_sq_diff` (exact for `int`/`nat` in the common case, best effort
+  otherwise). No flag; the next recompute from source stats is exact.
 - State is exact (`count, sum, sum_sq, min, max` as arbitrary-precision
   decimals); every derived field is computed exactly and rounded once to
   2 decimals, half away from zero. Stored statistics change in their last
@@ -62,5 +65,9 @@ then recompute stored aggregates. See README "Upgrading".
   emulation). Fixture output md5 `6a5ccf0d8485ceaf6debc2d615874145`.
 - `make fixture-check` fails if the committed oracle fixture is stale.
 - Benchmarks still far ahead of the reference (393-511x accumulate,
-  9,098-10,116x merge). Against 2.x per 100K rows: `str` unchanged, `int`
-  about 10% slower, `float` about 25% slower (the exactness cost).
+  9,098-10,116x merge). Against 2.x per 1M rows, with an i128 fast path
+  that falls back to BigInt: `str` unchanged, `int` at parity (950 vs
+  915 ms), `float` with 16-17 digit values about 20% slower (1350 vs
+  1105 ms).
+- `make upgrade-test`: real 2.0.0 install, then `ALTER EXTENSION UPDATE`;
+  stored aggregates merge with no recompute, and are exact after a REFRESH.

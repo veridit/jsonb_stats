@@ -66,7 +66,7 @@ The `jsonb_stats_final_internal` finalfunc converts the Internal `StatsState` to
 
 ## Exact Numeric State
 
-All numeric types (`int_agg`, `float_agg`, `dec2_agg`, `nat_agg`) keep an exact state of arbitrary-precision decimals (`src/exact.rs`: `BigInt` mantissa + decimal scale):
+All numeric types (`int_agg`, `float_agg`, `dec2_agg`, `nat_agg`) keep an exact state of decimals (`src/exact.rs`: integer mantissa + decimal scale). The mantissa is an `i128` while it fits (38 digits), and a `BigInt` beyond that. Every operation is overflow-checked and promotes to `BigInt` (or demotes back) by magnitude alone, so the representation never changes a result and never appears in JSON:
 
 ```
 count, sum = Σx, sum_sq = Σx², min, max
@@ -91,6 +91,8 @@ Each is computed from exact integers and rounded once to 2 decimals, half away f
 
 The parallel serialfunc encodes decimals as strings, so worker state crosses process boundaries without loss.
 
+**2.x summaries** (no `sum_sq`) are upgraded when read, in `NumFields::from_summary` (the only parser for stored summaries): `sum_sq = max(round_k(sum_sq_diff + sum²/count), ceil_k(sum²/count))` at the kind's `sum_sq` scale `k`. This is exact for int/nat when the stored error is < 0.5, best effort otherwise, and the state stays consistent. The PL/pgSQL reference implements the same rule.
+
 ## Parallel Aggregation
 
 Both `jsonb_stats_agg` and `jsonb_stats_merge_agg` are `parallel = safe` with three supporting functions in `src/parallel.rs`:
@@ -111,7 +113,7 @@ Error messages follow the pattern: `jsonb_stats: <description>`, e.g.:
 - `jsonb_stats: unknown stat type 'foo'. Expected: int, float, dec2, nat, str, bool, arr, date`
 - `jsonb_stats: nat value must be >= 0, got -1`
 - `jsonb_stats: type mismatch for key 'x': existing int_agg vs incoming str_agg`
-- `jsonb_stats: int_agg for key 'x' lacks 'sum_sq' (created by jsonb_stats < 3.0). Recompute it from the source stats.`
+- `jsonb_stats: int_agg for key 'x' has neither 'sum_sq' nor 'sum_sq_diff'`
 
 ## Performance
 

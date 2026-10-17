@@ -405,7 +405,11 @@ The Rust implementation (via pgrx) uses native `HashMap` state with `Box` heap a
 
 (Apple M-series, PostgreSQL 18, jsonb_stats 3.0, two full suite runs; the 10K-row timing is noisy at this size.) The merge speedup is larger because PL/pgSQL performs full JSONB serialization round-trips per group, while Rust merges native structs and only serializes once in the finalfunc.
 
-Exact arithmetic costs little. Per 100K rows, measured against the earlier f64 implementation: `str` is unchanged, `int` takes about 10% longer, and `float` (16-17 significant digits per value) takes about 25% longer.
+Exact arithmetic costs little. Values are held in 128-bit integers and switch to arbitrary precision only when a number outgrows 38 digits. Per 1M rows, compared with the earlier f64 implementation:
+- `str`: unchanged
+- `int`: at parity (about 950 vs 915 ms)
+- `float` with full 16-17 digit values: about 20% slower (1350 vs 1105 ms), because their squares need about 50 digits
+- `float` with a few decimals (e.g. currency): about 1000 ms
 
 ### Parallel aggregation
 
@@ -489,7 +493,7 @@ The extension follows a **fail-fast** strategy. Invalid input raises a PostgreSQ
 - **dec2 value with more than 2 decimals** → `ERROR: dec2 value must have at most 2 decimal places`
 - **Type mismatch** (e.g., a key that is `int` in one row and `float` in another, or merging `int_agg` with `str_agg`) → `ERROR: type mismatch for key '...'`
 - **Unknown aggregate type** → `ERROR: unknown aggregate type`
-- **Numeric summary without `sum_sq`** (written by jsonb_stats < 3.0) → `ERROR: ... lacks 'sum_sq' (created by jsonb_stats < 3.0). Recompute it from the source stats.`
+- **Numeric summary with neither `sum_sq` nor `sum_sq_diff`** → `ERROR: ... has neither 'sum_sq' nor 'sum_sq_diff'`. (2.x summaries, which have `sum_sq_diff`, are upgraded on read; see Upgrading.)
 - **Malformed numeric summary** (`count` not an integer >= 1, non-numeric state field, `count * sum_sq < sum²`) → `ERROR`
 - **`stat()` of NaN or ±Infinity** → `ERROR: stat() cannot represent non-finite value`
 
@@ -513,13 +517,16 @@ If you build from source, pin a release tag or commit, and bump it when you are 
 `make upgrade-test` (needs Docker) checks the upgrade path end to end:
 - it installs the previous release and stores aggregates in a materialized view
 - it runs `ALTER EXTENSION jsonb_stats UPDATE`
-- it verifies that the stored summaries are rejected before recomputation and correct after it
+- it verifies that the stored summaries keep working without a recompute, and are exact after one
 
 ### 2.x to 3.0
 
 The SQL interface is unchanged, so `ALTER EXTENSION jsonb_stats UPDATE` works (the upgrade script is a no-op). The **stored data format** did change:
 
-- **Recompute stored aggregates.** Numeric `*_agg` objects gain a required `sum_sq` field. Summaries written by 2.x lack it, and every merge/final function rejects them (`... lacks 'sum_sq' (created by jsonb_stats < 3.0)`) because the exact state cannot be recovered from them. Rebuild them from their source `stats`, e.g. with `REFRESH MATERIALIZED VIEW` or by re-running the `INSERT ... SELECT jsonb_stats_agg(...)` that produced them. Aggregates computed on the fly need nothing.
+- **No recompute needed.** Numeric `*_agg` objects gain a `sum_sq` field. Summaries written by 2.x don't have it, so it is rebuilt when they are read, from the stored `count`, `sum` and `sum_sq_diff` (`sum_sq ≈ sum_sq_diff + sum²/count`). Stored aggregates keep working: they can be merged with new data, finalized and stored again (now with `sum_sq`).
+  - For `int`/`nat` the rebuilt value is exact whenever the old `sum_sq_diff` was within 0.5 of the truth, which holds for typical data.
+  - For `dec2`/`float`, and for 2.x aggregates that were themselves merged (2.x merges were lossy), the rebuilt value is a best estimate. Derived statistics may then differ from an exact recompute in the last digits.
+  - Results become exact, and fully order- and machine-independent, the next time the aggregates are recomputed from their source `stats`, e.g. at the next data load or with `REFRESH MATERIALIZED VIEW`. There is no flag, and no need to recompute everything at upgrade time.
 - **Expected outputs change.** Results are now exact, so these fields change in their last digits:
   - `sum_sq_diff`, `variance`, `stddev` and `coefficient_of_variation_pct`
   - `mean`, where 2.x merges used the rounded mean
