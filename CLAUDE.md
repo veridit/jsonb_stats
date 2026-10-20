@@ -82,6 +82,20 @@ When repeated iterations fail, switch to **simplify and rebuild**: strip to a no
 
 Every version bump in `Cargo.toml` needs `sql/jsonb_stats--<prev>--<new>.sql`, so `ALTER EXTENSION jsonb_stats UPDATE` works. pgrx copies these into the extension dir. Diff the generated schema between the two versions (`cargo pgrx schema`) and put any CREATE/DROP/ALTER in the script. Keep the script even when it is empty. Add a "X to Y" section to README "Upgrading", and run `make upgrade-test`.
 
+Release checklist (downstream projects pin release tags, so every release gets one):
+
+1. Bump `version` in `Cargo.toml`, add the upgrade script, and add a `## X.Y.Z` section to `CHANGELOG.md`.
+2. Verify: `make test`, `make fixture-check`, `make xarch`, `make upgrade-test` (set `OLD_REF` to the previous tag), and clippy with no warnings.
+3. Commit, then push `master`.
+4. Tag and push: `git tag -a vX.Y.Z -m "jsonb_stats X.Y.Z: <summary>" && git push origin vX.Y.Z`
+5. Publish a GitHub release whose notes are the CHANGELOG section:
+   ```bash
+   awk '/^## X.Y.Z/{f=1;next} /^## /{if(f)exit} f' CHANGELOG.md > /tmp/notes.md
+   gh release create vX.Y.Z -R veridit/jsonb_stats --title "jsonb_stats X.Y.Z" --notes-file /tmp/notes.md --verify-tag
+   ```
+
+Existing tags: `v2.0.0` (tagged retroactively at c4a2595), `v3.0.0`.
+
 ## Git Setup
 
 ```bash

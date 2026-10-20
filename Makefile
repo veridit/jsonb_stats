@@ -9,11 +9,12 @@ SHELL := /bin/bash
 
 .PHONY: test test-crash run install package fixture fixture-check xarch upgrade-test
 
-# Real upgrade test (needs Docker): install 2.0.0, store aggregates,
-# ALTER EXTENSION UPDATE to this tree, verify rejection + recompute.
+# Real upgrade test (needs Docker): install OLD_REF (previous release tag),
+# store aggregates, ALTER EXTENSION UPDATE to this tree, verify results.
+OLD_REF ?= v2.0.0
 upgrade-test:
 	docker build --platform linux/arm64 -t jsonb-stats-builder -f dev/xarch/Dockerfile.builder dev/xarch
-	docker run --rm --platform linux/arm64 -v $(CURDIR):/src_ro:ro --tmpfs /cache:exec,size=8g \
+	docker run --rm --platform linux/arm64 -e OLD_REF=$(OLD_REF) -v $(CURDIR):/src_ro:ro --tmpfs /cache:exec,size=8g \
 		jsonb-stats-builder bash /src_ro/dev/xarch/upgrade_test.sh
 
 test:
