@@ -1,5 +1,22 @@
 # Changelog
 
+## 3.1.0
+
+Difference summaries (`stats_delta`) for keeping a stock over time as
+changes: add a unit's summary when it enters, subtract it when it leaves, and
+read the stock at any date as the running sum. Exact, order- and
+plan-independent, like the rest of the extension. See README "Stock over
+time".
+
+- `jsonb_stats_to_delta`, `jsonb_stats_negate`, `jsonb_stats_delta_merge`.
+- `jsonb_stats_delta_agg`: parallel safe, and a moving aggregate (sliding
+  window frames subtract instead of recomputing).
+- `jsonb_stats_delta_summary(stock, period)`: the stock as a `stats_agg`
+  marked `"min_max": false`, with the period's `in`/`out` flows and the
+  unit-free rates `change_pct` and `churn_pct` next to the coefficient of
+  variation.
+- Existing functions and stored aggregates are unchanged.
+
 ## 3.0.0
 
 Numeric aggregates are now exact and deterministic. Previously the same rows

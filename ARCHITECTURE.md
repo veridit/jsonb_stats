@@ -93,6 +93,33 @@ The parallel serialfunc encodes decimals as strings, so worker state crosses pro
 
 **2.x summaries** (no `sum_sq`) are upgraded when read, in `NumFields::from_summary` (the only parser for stored summaries): `sum_sq = max(round_k(sum_sq_diff + sum²/count), ceil_k(sum²/count))` at the kind's `sum_sq` scale `k`. This is exact for int/nat when the stored error is < 0.5, best effort otherwise, and the state stays consistent. The PL/pgSQL reference implements the same rule.
 
+## Difference Summaries (`stats_delta`)
+
+`src/delta.rs`, spec in `dev/reference_plpgsql.sql` ("Difference summaries").
+A stock over time is stored as changes. Each entry keeps two flows,
+`in` and `out`, each `{count, sum, sum_sq}` (numeric) or `{counts}` (+ `count`
+for arr). The stock is `in − out`.
+
+Why two flows instead of one signed state: each flow is a sum of real
+summaries, so it is always a valid state and can be checked on every input;
+negative counts only exist in the stock, and are rejected when a stock is read
+(`jsonb_stats_delta_summary`). The flows also give gross entries/exits
+(churn) for free.
+
+Exactness: adding flows only adds exact decimals and integers, so sums are
+associative and commutative, and the moving-aggregate inverse
+(`jsonb_stats_delta_minvfunc`) undoes an addition exactly. Canonical output
+form makes the bytes path-independent: int/nat sums at scale 0, dec2 at 2/4,
+float trimmed of trailing zeros (a float sum's scale would otherwise depend on
+which values were ever added); zero counts and empty flows are dropped.
+
+min/max are not kept (not invertible). `jsonb_stats_delta_summary` marks its
+output `"min_max": false`, and that output is refused as an input.
+
+`DeltaState` is the Internal state for the aggregate (sfunc = msfunc,
+minvfunc, combine, serial/deserial via serde, final borrows the state, as
+window aggregation keeps using it).
+
 ## Parallel Aggregation
 
 Both `jsonb_stats_agg` and `jsonb_stats_merge_agg` are `parallel = safe` with three supporting functions in `src/parallel.rs`:

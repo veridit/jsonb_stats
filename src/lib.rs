@@ -1395,6 +1395,55 @@ mod tests {
             "{msg} — Rust should be faster"
         );
     }
+
+    #[pg_test]
+    fn test_benchmark_delta_agg() {
+        load_plpgsql_reference();
+        // 1000 stats_agg groups as deltas: jsonb_stats_delta_agg must be about
+        // as fast as jsonb_stats_merge_agg over the same summaries.
+        Spi::run(
+            "CREATE TEMP TABLE bench_delta_src AS
+             WITH raw AS (
+                 SELECT (i % 1000) AS grp,
+                     jsonb_build_object(
+                         'num', jsonb_build_object('type', 'int', 'value', floor(random() * 1000)::int),
+                         'amt', jsonb_build_object('type', 'dec2', 'value', round((random() * 100000)::numeric, 2)),
+                         'str', jsonb_build_object('type', 'str', 'value', substr(md5(random()::text), 1, 3))
+                     ) AS stats
+                 FROM generate_series(1, 100000) i)
+             SELECT grp, jsonb_stats_agg(stats) AS agg FROM raw GROUP BY grp;
+             CREATE TEMP TABLE bench_delta AS
+             SELECT grp, CASE WHEN grp % 3 = 0 THEN jsonb_stats_negate(agg) ELSE jsonb_stats_to_delta(agg) END AS d
+             FROM bench_delta_src",
+        )
+        .unwrap();
+        let merge_ms = time_sql("SELECT jsonb_stats_merge_agg(agg) INTO TEMP TABLE bm FROM bench_delta_src");
+        let delta_ms = time_sql("SELECT jsonb_stats_delta_agg(d) INTO TEMP TABLE bd FROM bench_delta");
+        let window_ms = time_sql(
+            "SELECT jsonb_stats_delta_agg(d) OVER (ORDER BY grp ROWS BETWEEN 11 PRECEDING AND CURRENT ROW) AS r
+             INTO TEMP TABLE bw FROM bench_delta",
+        );
+        let plpgsql_ms = time_sql(
+            "SELECT jsonb_stats_delta_agg_plpgsql(d) INTO TEMP TABLE bp FROM (SELECT d FROM bench_delta LIMIT 100) t",
+        );
+        let rust100_ms = time_sql(
+            "SELECT jsonb_stats_delta_agg(d) INTO TEMP TABLE br FROM (SELECT d FROM bench_delta LIMIT 100) t",
+        );
+        let msg = format!(
+            "BENCHMARK delta 1K groups: delta_agg={:.0}ms, merge_agg={:.0}ms (ratio {:.2}), \
+             rolling-12 window over 1K rows={:.0}ms; 100 groups Rust={:.1}ms PL/pgSQL={:.0}ms ({:.0}x)",
+            delta_ms,
+            merge_ms,
+            delta_ms / merge_ms,
+            window_ms,
+            rust100_ms,
+            plpgsql_ms,
+            plpgsql_ms / rust100_ms
+        );
+        log_benchmark(&msg);
+        assert!(rust100_ms < plpgsql_ms, "{msg}");
+        assert!(delta_ms < merge_ms * 2.0 + 20.0, "{msg}");
+    }
 }
 
 #[cfg(test)]
