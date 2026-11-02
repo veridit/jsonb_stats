@@ -1,6 +1,13 @@
 PGRX_PG_CONFIG_PATH ?= /Applications/Postgres.app/Contents/Versions/18/bin/pg_config
 BINDGEN_EXTRA_CLANG_ARGS ?= -isysroot $(shell xcrun --show-sdk-path)
 
+# bindgen must use Apple's libclang: Homebrew llvm 22 produces opaque structs
+# for pgrx 0.16 (errors like "no field `rd_tableam`").
+ifneq ($(wildcard /Library/Developer/CommandLineTools/usr/lib/libclang.dylib),)
+LIBCLANG_PATH ?= /Library/Developer/CommandLineTools/usr/lib
+export LIBCLANG_PATH
+endif
+
 export PGRX_PG_CONFIG_PATH
 export BINDGEN_EXTRA_CLANG_ARGS
 

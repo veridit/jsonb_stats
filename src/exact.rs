@@ -277,6 +277,77 @@ impl Decimal {
         }
     }
 
+    pub fn zero() -> Decimal {
+        Decimal::from_i64(0)
+    }
+
+    pub fn from_i64(v: i64) -> Decimal {
+        Decimal {
+            mantissa: Mant::Small(v as i128),
+            scale: 0,
+        }
+    }
+
+    pub fn is_zero(&self) -> bool {
+        // By the Mant invariant a Big is never zero.
+        matches!(self.mantissa, Mant::Small(0))
+    }
+
+    /// The absolute value.
+    pub fn abs(self) -> Decimal {
+        if self.is_negative() {
+            self.negated()
+        } else {
+            self
+        }
+    }
+
+    /// `self += sign * other` (sign is +1 or -1).
+    pub fn add_signed(&mut self, other: &Decimal, negative: bool) {
+        if negative {
+            self.add_assign(&other.clone().negated());
+        } else {
+            self.add_assign(other);
+        }
+    }
+
+    /// Same value without trailing fractional zeros (PostgreSQL `trim_scale`).
+    pub fn trimmed(self) -> Decimal {
+        if self.scale == 0 {
+            return self;
+        }
+        if self.is_zero() {
+            return Decimal::zero();
+        }
+        match self.mantissa {
+            Mant::Small(mut v) => {
+                let mut scale = self.scale;
+                while scale > 0 && v % 10 == 0 {
+                    v /= 10;
+                    scale -= 1;
+                }
+                Decimal {
+                    mantissa: Mant::Small(v),
+                    scale,
+                }
+            }
+            Mant::Big(b) => {
+                let mut b = b;
+                let mut scale = self.scale;
+                let ten = BigInt::from(10u8);
+                while scale > 0 {
+                    let (q, r) = b.div_rem(&ten);
+                    if !r.is_zero() {
+                        break;
+                    }
+                    b = q;
+                    scale -= 1;
+                }
+                Decimal::new(b, scale)
+            }
+        }
+    }
+
     /// The value as an i64, if it is integral and in range.
     pub fn to_i64(&self) -> Option<i64> {
         if !self.is_integral() {

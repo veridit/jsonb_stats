@@ -3,6 +3,7 @@ use pgrx::prelude::*;
 pg_module_magic!();
 
 mod accum;
+mod delta;
 mod exact;
 mod final_fn;
 mod merge;
@@ -12,6 +13,11 @@ mod state;
 
 // Re-export all pg_extern functions so pgrx can discover them
 pub use accum::{jsonb_stats_accum, jsonb_stats_accum_sfunc};
+pub use delta::{
+    jsonb_stats_delta_combine, jsonb_stats_delta_deserial, jsonb_stats_delta_final,
+    jsonb_stats_delta_merge, jsonb_stats_delta_minvfunc, jsonb_stats_delta_serial,
+    jsonb_stats_delta_sfunc, jsonb_stats_delta_summary, jsonb_stats_negate, jsonb_stats_to_delta,
+};
 pub use final_fn::{jsonb_stats_final, jsonb_stats_final_internal};
 pub use merge::{jsonb_stats_merge, jsonb_stats_merge_sfunc};
 pub use parallel::{jsonb_stats_combine, jsonb_stats_deserial, jsonb_stats_serial};
@@ -78,6 +84,35 @@ LANGUAGE SQL IMMUTABLE STRICT PARALLEL SAFE;
         jsonb_stats_sfunc,
         stats_from_jsonb,
         stat
+    ]
+);
+
+extension_sql!(
+    r#"
+-- stats_delta -> stats_delta: running sums of changes (parallel-safe, and a
+-- moving aggregate: window frames that slide remove rows exactly).
+CREATE AGGREGATE jsonb_stats_delta_agg(jsonb) (
+    sfunc = jsonb_stats_delta_sfunc,
+    stype = internal,
+    finalfunc = jsonb_stats_delta_final,
+    combinefunc = jsonb_stats_delta_combine,
+    serialfunc = jsonb_stats_delta_serial,
+    deserialfunc = jsonb_stats_delta_deserial,
+    msfunc = jsonb_stats_delta_sfunc,
+    minvfunc = jsonb_stats_delta_minvfunc,
+    mstype = internal,
+    mfinalfunc = jsonb_stats_delta_final,
+    parallel = safe
+);
+"#,
+    name = "delta_aggregates",
+    requires = [
+        jsonb_stats_delta_sfunc,
+        jsonb_stats_delta_minvfunc,
+        jsonb_stats_delta_final,
+        jsonb_stats_delta_combine,
+        jsonb_stats_delta_serial,
+        jsonb_stats_delta_deserial
     ]
 );
 
