@@ -13,4 +13,5 @@ until [ "$(grep -c 'ready to accept' /tmp/pg.log 2>/dev/null)" -ge 2 ]; do sleep
 echo "arch=$arch"
 psql -X -q -U postgres -v ON_ERROR_STOP=1 -At \
   -f /dev_src/reference_plpgsql.sql -f /dev_src/fixtures/exact_fixture.sql \
-  -f /dev_src/xarch_checks.sql -f /dev_src/xarch_checks_rust.sql
+  -f /dev_src/xarch_checks.sql -f /dev_src/xarch_checks_rust.sql \
+  -f /dev_src/fixtures/delta_fixture.sql -f /dev_src/xarch_checks_delta.sql
