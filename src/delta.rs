@@ -217,7 +217,11 @@ impl Flow {
                 }
                 Flow::Cat {
                     count: *count,
-                    counts: counts.iter().filter(|(_, v)| **v != 0).map(|(k, v)| (k.clone(), *v)).collect(),
+                    counts: counts
+                        .iter()
+                        .filter(|(_, v)| **v != 0)
+                        .map(|(k, v)| (k.clone(), *v))
+                        .collect(),
                 }
             }
         }
@@ -320,8 +324,17 @@ impl DeltaEntry {
             ("", false)
         };
         let Some(kind) = DKind::from_base(base) else {
-            let shown = if t.is_empty() { "<NULL>".to_string() } else { t.to_string() };
-            pgrx::error!("jsonb_stats: unknown summary type '{}' for key '{}'. {}", shown, key, UNKNOWN_SUMMARY_TYPE)
+            let shown = if t.is_empty() {
+                "<NULL>".to_string()
+            } else {
+                t.to_string()
+            };
+            pgrx::error!(
+                "jsonb_stats: unknown summary type '{}' for key '{}'. {}",
+                shown,
+                key,
+                UNKNOWN_SUMMARY_TYPE
+            )
         };
         if is_delta {
             let flow = |side: &str| -> Flow {
@@ -350,7 +363,10 @@ impl DeltaEntry {
                 let mut m = Map::new();
                 m.insert("counts".into(), counts);
                 if kind == DKind::Arr {
-                    m.insert("count".into(), obj.get("count").cloned().unwrap_or_else(|| json!(0)));
+                    m.insert(
+                        "count".into(),
+                        obj.get("count").cloned().unwrap_or_else(|| json!(0)),
+                    );
                 }
                 parse_flow(kind, key, "in", &Value::Object(m))
             }
@@ -393,7 +409,9 @@ fn parse_flow(kind: DKind, key: &str, side: &str, v: &Value) -> Flow {
             reason
         )
     };
-    let Value::Object(obj) = v else { fail("must be an object") };
+    let Value::Object(obj) = v else {
+        fail("must be an object")
+    };
     let int = |v: Option<&Value>, reason: &str| -> i64 {
         match v {
             Some(Value::Number(n)) => Decimal::from_str(n.as_str())
@@ -487,7 +505,10 @@ impl DeltaState {
             Some(cur) => cur.add(&key, &e, negative),
             None => {
                 if negative {
-                    pgrx::error!("jsonb_stats: cannot remove key '{}' that was never added", key);
+                    pgrx::error!(
+                        "jsonb_stats: cannot remove key '{}' that was never added",
+                        key
+                    );
                 }
                 self.entries.insert(key, e);
             }
@@ -545,7 +566,13 @@ fn num_summary(kind: NumKind, count: i64, sum: &Decimal, sum_sq: &Decimal) -> Ma
         m.insert("count".into(), json!(0));
         m.insert("sum".into(), sum.to_json());
         m.insert("sum_sq".into(), sum_sq.to_json());
-        for f in ["mean", "sum_sq_diff", "variance", "stddev", "coefficient_of_variation_pct"] {
+        for f in [
+            "mean",
+            "sum_sq_diff",
+            "variance",
+            "stddev",
+            "coefficient_of_variation_pct",
+        ] {
             m.insert(f.into(), Value::Null);
         }
         return m;
@@ -627,8 +654,11 @@ fn delta_summary(stock: Value, period: Option<Value>) -> Value {
             (Flow::Num { count, sum, sum_sq }, DKind::Num(k)) => {
                 let mut m = num_summary(k, *count, sum, sum_sq);
                 if let Some((prev, pin, pout)) = &flows {
-                    let (Flow::Num { sum: s0, .. }, Flow::Num { sum: si, .. }, Flow::Num { sum: so, .. }) =
-                        (prev, pin, pout)
+                    let (
+                        Flow::Num { sum: s0, .. },
+                        Flow::Num { sum: si, .. },
+                        Flow::Num { sum: so, .. },
+                    ) = (prev, pin, pout)
                     else {
                         unreachable!()
                     };
@@ -690,7 +720,10 @@ pub fn jsonb_stats_delta_merge(a: JsonB, b: JsonB) -> JsonB {
 /// with flows and change/churn rates for an optional period (the sum of the
 /// deltas inside the last period). Spec: jsonb_stats_delta_summary_plpgsql
 #[pg_extern(immutable, parallel_safe)]
-pub fn jsonb_stats_delta_summary(stock: Option<JsonB>, period: default!(Option<JsonB>, "NULL")) -> Option<JsonB> {
+pub fn jsonb_stats_delta_summary(
+    stock: Option<JsonB>,
+    period: default!(Option<JsonB>, "NULL"),
+) -> Option<JsonB> {
     let stock = stock?;
     Some(JsonB(delta_summary(stock.0, period.map(|p| p.0))))
 }

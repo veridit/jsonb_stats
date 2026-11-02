@@ -682,7 +682,7 @@ mod unit {
             "13043817825332782213".to_string(),
             "99999999999999999999999999999999999999".to_string(),
         ];
-        let mut gen = |rnd: &mut dyn FnMut(u64) -> u64| -> String {
+        let gen = |rnd: &mut dyn FnMut(u64) -> u64| -> String {
             if rnd(10) == 0 {
                 let b = &boundary[rnd(boundary.len() as u64) as usize];
                 let sc = rnd(3) as usize;

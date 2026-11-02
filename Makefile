@@ -14,7 +14,7 @@ export BINDGEN_EXTRA_CLANG_ARGS
 PG_VERSION ?= pg18
 SHELL := /bin/bash
 
-.PHONY: test test-crash run install package fixture fixture-check xarch upgrade-test
+.PHONY: clippy test test-crash run install package fixture fixture-check xarch upgrade-test
 
 # Real upgrade test (needs Docker): install OLD_REF (previous release tag),
 # store aggregates, ALTER EXTENSION UPDATE to this tree, verify results.
@@ -26,6 +26,9 @@ upgrade-test:
 
 test:
 	cargo pgrx test $(PG_VERSION)
+
+clippy:
+	cargo clippy --features "$(PG_VERSION) pg_test" --no-default-features --all-targets -- -D warnings
 
 # Regenerate the exact-oracle fixture used by src/tests_exact.rs
 fixture:
