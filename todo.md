@@ -139,3 +139,29 @@ no extra allocation per row, bench vs jsonb_stats_merge_agg must not regress):
 4. Tests (round trip, running sum == alive-units merge per date, order/parallel
    independence, moving == plain window, invalid stock fails, flow identity).
 5. Bench, upgrade script, CHANGELOG, README. No tag/release before review.
+
+### Design decisions (made overnight, 2026-11-02, review in the morning)
+
+- A `stats_delta` entry keeps two flows, not one signed state:
+  `{"type": "int_delta", "in": {count, sum, sum_sq}, "out": {count, sum, sum_sq}}`.
+  Each flow is a sum of real summaries, so it is always a valid nonnegative
+  state (obstacles 1 and 2 above disappear); the stock is `in - out`, checked
+  only when a stock is read. Counted kinds: `{"in": {"counts"}, "out": {"counts"}}`
+  (arr also `count`). Types: int/nat/dec2/float/str/bool/arr/date `_delta`.
+- Canonical form, so output is identical for any order/grouping/window path:
+  int/nat sums at scale 0, dec2 at 2 (sum_sq 4), float trimmed of trailing
+  zeros (trim_scale); zero counts dropped; entries with both flows empty dropped.
+- Variables named `min_max` are rejected in deltas (reserved marker key).
+- API:
+  - `jsonb_stats_to_delta(stats_agg) -> stats_delta` (entry event)
+  - `jsonb_stats_negate(stats_agg | stats_delta) -> stats_delta` (exit; swaps in/out)
+  - `jsonb_stats_delta_merge(a, b) -> stats_delta` (scalar add)
+  - `jsonb_stats_delta_agg(stats_delta) -> stats_delta` (Internal state, parallel,
+    moving-aggregate inverse for windows)
+  - `jsonb_stats_delta_summary(stock stats_delta[, period stats_delta]) -> stats_agg`
+    with `"min_max": false`: per numeric key count, sum, sum_sq, mean,
+    sum_sq_diff, variance, stddev, CV (as today, mean/sum_sq_diff null when
+    count 0); with a period also `in`/`out` {count, sum}, `change_pct`,
+    `churn_pct` (denominator |previous sum|, null when 0). Counted kinds get
+    net counts (and in/out counts with a period). Fails fast when the stock or
+    the previous stock (stock - period) is invalid.
