@@ -440,3 +440,491 @@ CREATE AGGREGATE jsonb_stats_merge_agg_plpgsql(jsonb) (
     combinefunc = jsonb_stats_merge_state_plpgsql,
     parallel = safe
 );
+
+-- ════════════════════════════════════════════════════════════════════════
+-- Difference summaries: stats_delta (jsonb_stats 3.1)
+-- ════════════════════════════════════════════════════════════════════════
+--
+-- A stats_delta records changes to a stock: a unit's summary is added when it
+-- enters (jsonb_stats_to_delta) and subtracted when it leaves
+-- (jsonb_stats_negate). Each entry keeps the two flows apart:
+--
+--   {"type": "int_delta", "in": {"count", "sum", "sum_sq"}, "out": {...}}
+--   {"type": "str_delta", "in": {"counts": {...}}, "out": {...}}   (arr: + "count")
+--
+-- Each flow is a sum of real summaries, so it is a valid nonnegative state;
+-- the stock is in - out. Adding deltas only adds flows, so the result does not
+-- depend on order, grouping or parallel plan. min/max are not kept (they
+-- cannot be subtracted).
+--
+-- Canonical form (identical bytes on every path): int/nat sums at scale 0,
+-- dec2 sum at scale 2 and sum_sq at scale 4, float trimmed of trailing zeros;
+-- zero counts, empty flows and entries without flows are omitted.
+--
+-- In PL/pgSQL the running state is a "loose" map: every entry carries both
+-- flows, empty ones included.
+
+-- Validate one numeric flow and return it canonical: {count, sum, sum_sq}.
+-- A NULL flow is empty.
+CREATE OR REPLACE FUNCTION jsonb_stats_delta_num_flow_plpgsql(
+    delta_type text, key text, side text, flow jsonb)
+RETURNS jsonb
+LANGUAGE plpgsql IMMUTABLE
+AS $jsonb_stats_delta_num_flow_plpgsql$
+DECLARE
+    kind text := split_part(delta_type, '_', 1);
+    c numeric; s numeric; q numeric;
+    reason text;
+BEGIN
+    IF flow IS NULL THEN
+        c := 0; s := 0; q := 0;
+    ELSIF jsonb_typeof(flow) IS DISTINCT FROM 'object' THEN
+        reason := 'must be an object';
+    ELSIF jsonb_typeof(flow->'count') IS DISTINCT FROM 'number'
+          OR (flow->'count')::numeric < 0
+          OR (flow->'count')::numeric <> trunc((flow->'count')::numeric) THEN
+        reason := 'count must be an integer >= 0';
+    ELSIF jsonb_typeof(flow->'sum') IS DISTINCT FROM 'number'
+          OR jsonb_typeof(flow->'sum_sq') IS DISTINCT FROM 'number' THEN
+        reason := 'sum and sum_sq must be numbers';
+    ELSE
+        c := trunc((flow->'count')::numeric);
+        s := (flow->'sum')::numeric;
+        q := (flow->'sum_sq')::numeric;
+    END IF;
+    IF reason IS NULL THEN
+        IF kind IN ('int', 'nat') AND (s <> trunc(s) OR q <> trunc(q)) THEN
+            reason := 'sum and sum_sq must be integers';
+        ELSIF kind = 'dec2' AND (s <> round(s, 2) OR q <> round(q, 4)) THEN
+            reason := 'sum must have at most 2 and sum_sq at most 4 decimals';
+        ELSIF kind = 'nat' AND s < 0 THEN
+            reason := 'sum must be >= 0';
+        ELSIF c * q < s * s OR (c = 0 AND q <> 0) THEN
+            reason := 'inconsistent (count * sum_sq < sum^2)';
+        END IF;
+    END IF;
+    IF reason IS NOT NULL THEN
+        RAISE EXCEPTION 'jsonb_stats: % for key ''%'' has an invalid ''%'' flow: %',
+            delta_type, key, side, reason;
+    END IF;
+    IF kind IN ('int', 'nat') THEN
+        s := trunc(s); q := trunc(q);
+    ELSIF kind = 'dec2' THEN
+        s := round(s, 2); q := round(q, 4);
+    ELSE
+        s := trim_scale(s); q := trim_scale(q);
+    END IF;
+    RETURN jsonb_build_object('count', c, 'sum', s, 'sum_sq', q);
+END;
+$jsonb_stats_delta_num_flow_plpgsql$;
+
+-- Validate one counted flow and return it canonical: {counts} (arr: + count),
+-- zero counts removed. A NULL flow is empty.
+CREATE OR REPLACE FUNCTION jsonb_stats_delta_cat_flow_plpgsql(
+    delta_type text, key text, side text, flow jsonb)
+RETURNS jsonb
+LANGUAGE plpgsql IMMUTABLE
+AS $jsonb_stats_delta_cat_flow_plpgsql$
+DECLARE
+    counts jsonb := '{}';
+    k text; v jsonb;
+    n numeric := 0;
+    reason text;
+BEGIN
+    IF flow IS NOT NULL THEN
+        IF jsonb_typeof(flow) IS DISTINCT FROM 'object' THEN
+            reason := 'must be an object';
+        ELSIF jsonb_typeof(flow->'counts') IS DISTINCT FROM 'object' THEN
+            reason := 'counts must be an object';
+        ELSIF delta_type = 'arr_delta'
+              AND (jsonb_typeof(flow->'count') IS DISTINCT FROM 'number'
+                   OR (flow->'count')::numeric < 0
+                   OR (flow->'count')::numeric <> trunc((flow->'count')::numeric)) THEN
+            reason := 'count must be an integer >= 0';
+        ELSE
+            IF delta_type = 'arr_delta' THEN
+                n := trunc((flow->'count')::numeric);
+            END IF;
+            FOR k, v IN SELECT * FROM jsonb_each(flow->'counts') LOOP
+                IF jsonb_typeof(v) IS DISTINCT FROM 'number' OR v::numeric < 0
+                   OR v::numeric <> trunc(v::numeric) THEN
+                    reason := 'counts must be integers >= 0';
+                    EXIT;
+                END IF;
+                IF v::numeric <> 0 THEN
+                    counts := counts || jsonb_build_object(k, trunc(v::numeric));
+                END IF;
+            END LOOP;
+        END IF;
+    END IF;
+    IF reason IS NOT NULL THEN
+        RAISE EXCEPTION 'jsonb_stats: % for key ''%'' has an invalid ''%'' flow: %',
+            delta_type, key, side, reason;
+    END IF;
+    IF delta_type = 'arr_delta' THEN
+        RETURN jsonb_build_object('count', n, 'counts', counts);
+    END IF;
+    RETURN jsonb_build_object('counts', counts);
+END;
+$jsonb_stats_delta_cat_flow_plpgsql$;
+
+-- One summary (*_agg or *_delta) as a loose delta entry.
+CREATE OR REPLACE FUNCTION jsonb_stats_delta_entry_plpgsql(key text, summary jsonb)
+RETURNS jsonb
+LANGUAGE plpgsql IMMUTABLE
+AS $jsonb_stats_delta_entry_plpgsql$
+DECLARE
+    t text := summary->>'type';
+    kind text;
+    dt text;
+    st record;
+    in_flow jsonb;
+BEGIN
+    IF key = 'min_max' THEN
+        RAISE EXCEPTION 'jsonb_stats: key ''min_max'' is reserved in stats_delta';
+    END IF;
+    IF jsonb_typeof(summary) IS DISTINCT FROM 'object' THEN
+        RAISE EXCEPTION 'jsonb_stats: summary for key ''%'' must be an object', key;
+    END IF;
+    kind := regexp_replace(t, '_(agg|delta)$', '');
+    IF t IS NULL OR kind = t
+       OR kind NOT IN ('int', 'nat', 'dec2', 'float', 'str', 'bool', 'arr', 'date') THEN
+        RAISE EXCEPTION 'jsonb_stats: unknown summary type ''%'' for key ''%''. Expected a *_agg or *_delta of: int, float, dec2, nat, str, bool, arr, date', t, key;
+    END IF;
+    dt := kind || '_delta';
+    IF t = dt THEN
+        IF kind IN ('int', 'nat', 'dec2', 'float') THEN
+            RETURN jsonb_build_object('type', dt,
+                'in', jsonb_stats_delta_num_flow_plpgsql(dt, key, 'in', summary->'in'),
+                'out', jsonb_stats_delta_num_flow_plpgsql(dt, key, 'out', summary->'out'));
+        END IF;
+        RETURN jsonb_build_object('type', dt,
+            'in', jsonb_stats_delta_cat_flow_plpgsql(dt, key, 'in', summary->'in'),
+            'out', jsonb_stats_delta_cat_flow_plpgsql(dt, key, 'out', summary->'out'));
+    END IF;
+    -- A *_agg: everything flows in.
+    IF kind IN ('int', 'nat', 'dec2', 'float') THEN
+        st := jsonb_stats_num_state_plpgsql(key, summary);
+        in_flow := jsonb_build_object('count', st.count_val, 'sum', st.sum_val, 'sum_sq', st.sum_sq_val);
+        RETURN jsonb_build_object('type', dt,
+            'in', jsonb_stats_delta_num_flow_plpgsql(dt, key, 'in', in_flow),
+            'out', jsonb_stats_delta_num_flow_plpgsql(dt, key, 'out', NULL));
+    END IF;
+    in_flow := jsonb_build_object('counts', COALESCE(summary->'counts', '{}'));
+    IF kind = 'arr' THEN
+        in_flow := in_flow || jsonb_build_object('count', COALESCE(summary->'count', '0'));
+    END IF;
+    RETURN jsonb_build_object('type', dt,
+        'in', jsonb_stats_delta_cat_flow_plpgsql(dt, key, 'in', in_flow),
+        'out', jsonb_stats_delta_cat_flow_plpgsql(dt, key, 'out', NULL));
+END;
+$jsonb_stats_delta_entry_plpgsql$;
+
+-- a + sign * b for two loose flows of the same kind (no validation: the
+-- inverse transition may pass through partial states).
+CREATE OR REPLACE FUNCTION jsonb_stats_delta_flow_add_plpgsql(a jsonb, b jsonb, sign int)
+RETURNS jsonb
+LANGUAGE plpgsql IMMUTABLE STRICT
+AS $jsonb_stats_delta_flow_add_plpgsql$
+DECLARE
+    counts jsonb;
+    k text; v jsonb; n numeric;
+BEGIN
+    IF a ? 'sum' THEN
+        RETURN jsonb_build_object(
+            'count', (a->>'count')::numeric + sign * (b->>'count')::numeric,
+            'sum', (a->>'sum')::numeric + sign * (b->>'sum')::numeric,
+            'sum_sq', (a->>'sum_sq')::numeric + sign * (b->>'sum_sq')::numeric);
+    END IF;
+    counts := a->'counts';
+    FOR k, v IN SELECT * FROM jsonb_each(b->'counts') LOOP
+        n := COALESCE((counts->>k)::numeric, 0) + sign * v::numeric;
+        IF n = 0 THEN
+            counts := counts - k;
+        ELSE
+            counts := counts || jsonb_build_object(k, n);
+        END IF;
+    END LOOP;
+    IF a ? 'count' THEN
+        RETURN jsonb_build_object('counts', counts,
+            'count', (a->>'count')::numeric + sign * (b->>'count')::numeric);
+    END IF;
+    RETURN jsonb_build_object('counts', counts);
+END;
+$jsonb_stats_delta_flow_add_plpgsql$;
+
+-- Loose state + sign * input. Input: stats_delta, stats_agg or stats.
+-- sign = -1 is the moving-aggregate inverse: it removes an input added before.
+CREATE OR REPLACE FUNCTION jsonb_stats_delta_state_add_plpgsql(state jsonb, d jsonb, sign int)
+RETURNS jsonb
+LANGUAGE plpgsql IMMUTABLE
+AS $jsonb_stats_delta_state_add_plpgsql$
+DECLARE
+    result jsonb := COALESCE(state, '{}');
+    key text; summary jsonb; e jsonb; cur jsonb;
+BEGIN
+    IF d IS NULL THEN
+        RETURN result;
+    END IF;
+    IF jsonb_typeof(d) IS DISTINCT FROM 'object' THEN
+        RAISE EXCEPTION 'jsonb_stats: stats_delta input must be an object';
+    END IF;
+    IF d->>'type' = 'stats' THEN
+        d := jsonb_stats_final_plpgsql(jsonb_stats_accum_plpgsql('{}', d));
+    ELSIF d ? 'type' AND d->>'type' NOT IN ('stats_agg', 'stats_delta') THEN
+        RAISE EXCEPTION 'jsonb_stats: expected stats, stats_agg or stats_delta, got type %', d->'type';
+    END IF;
+    IF d->'min_max' = 'false' THEN
+        RAISE EXCEPTION 'jsonb_stats: a stats_agg without min/max (from jsonb_stats_delta_summary) is a result, not an input';
+    END IF;
+    FOR key, summary IN SELECT * FROM jsonb_each(d) LOOP
+        IF key = 'type' THEN CONTINUE; END IF;
+        e := jsonb_stats_delta_entry_plpgsql(key, summary);
+        cur := result->key;
+        IF cur IS NULL THEN
+            IF sign <> 1 THEN
+                RAISE EXCEPTION 'jsonb_stats: cannot remove key ''%'' that was never added', key;
+            END IF;
+            result := result || jsonb_build_object(key, e);
+        ELSE
+            IF cur->>'type' IS DISTINCT FROM e->>'type' THEN
+                RAISE EXCEPTION 'jsonb_stats: type mismatch for key ''%'': existing % vs incoming %',
+                    key, cur->>'type', e->>'type';
+            END IF;
+            result := result || jsonb_build_object(key, jsonb_build_object('type', e->>'type',
+                'in', jsonb_stats_delta_flow_add_plpgsql(cur->'in', e->'in', sign),
+                'out', jsonb_stats_delta_flow_add_plpgsql(cur->'out', e->'out', sign)));
+        END IF;
+    END LOOP;
+    RETURN result;
+END;
+$jsonb_stats_delta_state_add_plpgsql$;
+
+-- The empty flow of a delta type.
+CREATE OR REPLACE FUNCTION jsonb_stats_delta_flow_zero_plpgsql(dt text)
+RETURNS jsonb
+LANGUAGE sql IMMUTABLE STRICT
+AS $jsonb_stats_delta_flow_zero_plpgsql$
+    SELECT CASE
+        WHEN dt IN ('int_delta', 'nat_delta', 'dec2_delta', 'float_delta')
+            THEN '{"count": 0, "sum": 0, "sum_sq": 0}'::jsonb
+        WHEN dt = 'arr_delta' THEN '{"count": 0, "counts": {}}'::jsonb
+        ELSE '{"counts": {}}'::jsonb
+    END
+$jsonb_stats_delta_flow_zero_plpgsql$;
+
+-- Is a loose flow empty?
+CREATE OR REPLACE FUNCTION jsonb_stats_delta_flow_empty_plpgsql(flow jsonb)
+RETURNS boolean
+LANGUAGE sql IMMUTABLE STRICT
+AS $jsonb_stats_delta_flow_empty_plpgsql$
+    SELECT COALESCE((flow->>'count')::numeric, 0) = 0 AND (flow->'counts' IS NULL OR flow->'counts' = '{}')
+$jsonb_stats_delta_flow_empty_plpgsql$;
+
+-- Loose state -> canonical stats_delta (validates every flow).
+CREATE OR REPLACE FUNCTION jsonb_stats_delta_out_plpgsql(state jsonb)
+RETURNS jsonb
+LANGUAGE plpgsql IMMUTABLE
+AS $jsonb_stats_delta_out_plpgsql$
+DECLARE
+    result jsonb := jsonb_build_object('type', 'stats_delta');
+    key text; e jsonb; dt text; entry jsonb; side text; flow jsonb;
+BEGIN
+    FOR key, e IN SELECT * FROM jsonb_each(COALESCE(state, '{}')) LOOP
+        dt := e->>'type';
+        entry := jsonb_build_object('type', dt);
+        FOREACH side IN ARRAY ARRAY['in', 'out'] LOOP
+            IF dt IN ('int_delta', 'nat_delta', 'dec2_delta', 'float_delta') THEN
+                flow := jsonb_stats_delta_num_flow_plpgsql(dt, key, side, e->side);
+            ELSE
+                flow := jsonb_stats_delta_cat_flow_plpgsql(dt, key, side, e->side);
+            END IF;
+            IF NOT jsonb_stats_delta_flow_empty_plpgsql(flow) THEN
+                entry := entry || jsonb_build_object(side, flow);
+            END IF;
+        END LOOP;
+        IF entry ? 'in' OR entry ? 'out' THEN
+            result := result || jsonb_build_object(key, entry);
+        END IF;
+    END LOOP;
+    RETURN result;
+END;
+$jsonb_stats_delta_out_plpgsql$;
+
+-- Swap in and out of every entry of a loose state.
+CREATE OR REPLACE FUNCTION jsonb_stats_delta_swap_plpgsql(state jsonb)
+RETURNS jsonb
+LANGUAGE sql IMMUTABLE STRICT
+AS $jsonb_stats_delta_swap_plpgsql$
+    SELECT COALESCE(jsonb_object_agg(key, jsonb_build_object('type', value->'type', 'in', value->'out', 'out', value->'in')), '{}')
+    FROM jsonb_each(state)
+$jsonb_stats_delta_swap_plpgsql$;
+
+-- Entry event: a stats_agg (or stats, or stats_delta) as a stats_delta.
+CREATE OR REPLACE FUNCTION jsonb_stats_to_delta_plpgsql(x jsonb)
+RETURNS jsonb
+LANGUAGE sql IMMUTABLE STRICT
+AS $jsonb_stats_to_delta_plpgsql$
+    SELECT jsonb_stats_delta_out_plpgsql(jsonb_stats_delta_state_add_plpgsql('{}', x, 1))
+$jsonb_stats_to_delta_plpgsql$;
+
+-- Exit event: the negation (in and out swapped).
+CREATE OR REPLACE FUNCTION jsonb_stats_negate_plpgsql(x jsonb)
+RETURNS jsonb
+LANGUAGE sql IMMUTABLE STRICT
+AS $jsonb_stats_negate_plpgsql$
+    SELECT jsonb_stats_delta_out_plpgsql(jsonb_stats_delta_swap_plpgsql(
+        jsonb_stats_delta_state_add_plpgsql('{}', x, 1)))
+$jsonb_stats_negate_plpgsql$;
+
+CREATE OR REPLACE FUNCTION jsonb_stats_delta_merge_plpgsql(a jsonb, b jsonb)
+RETURNS jsonb
+LANGUAGE sql IMMUTABLE STRICT
+AS $jsonb_stats_delta_merge_plpgsql$
+    SELECT jsonb_stats_delta_out_plpgsql(jsonb_stats_delta_state_add_plpgsql(
+        jsonb_stats_delta_state_add_plpgsql('{}', a, 1), b, 1))
+$jsonb_stats_delta_merge_plpgsql$;
+
+CREATE OR REPLACE FUNCTION jsonb_stats_delta_sfunc_plpgsql(state jsonb, d jsonb)
+RETURNS jsonb LANGUAGE sql IMMUTABLE
+AS $jsonb_stats_delta_sfunc_plpgsql$ SELECT jsonb_stats_delta_state_add_plpgsql(state, d, 1) $jsonb_stats_delta_sfunc_plpgsql$;
+
+CREATE OR REPLACE FUNCTION jsonb_stats_delta_minvfunc_plpgsql(state jsonb, d jsonb)
+RETURNS jsonb LANGUAGE sql IMMUTABLE
+AS $jsonb_stats_delta_minvfunc_plpgsql$ SELECT jsonb_stats_delta_state_add_plpgsql(state, d, -1) $jsonb_stats_delta_minvfunc_plpgsql$;
+
+CREATE OR REPLACE FUNCTION jsonb_stats_delta_combine_plpgsql(a jsonb, b jsonb)
+RETURNS jsonb LANGUAGE sql IMMUTABLE
+AS $jsonb_stats_delta_combine_plpgsql$
+    SELECT jsonb_stats_delta_state_add_plpgsql(a, jsonb_stats_delta_out_plpgsql(b), 1)
+$jsonb_stats_delta_combine_plpgsql$;
+
+CREATE AGGREGATE jsonb_stats_delta_agg_plpgsql(jsonb) (
+    sfunc = jsonb_stats_delta_sfunc_plpgsql,
+    stype = jsonb,
+    initcond = '{}',
+    finalfunc = jsonb_stats_delta_out_plpgsql,
+    combinefunc = jsonb_stats_delta_combine_plpgsql,
+    msfunc = jsonb_stats_delta_sfunc_plpgsql,
+    minvfunc = jsonb_stats_delta_minvfunc_plpgsql,
+    mstype = jsonb,
+    minitcond = '{}',
+    mfinalfunc = jsonb_stats_delta_out_plpgsql,
+    parallel = safe
+);
+
+-- ── Reading a stock: jsonb_stats_delta_summary ──
+--
+-- jsonb_stats_delta_summary(stock, period) turns a running sum of deltas into
+-- a stats_agg marked "min_max": false. stock is the sum of all changes up to
+-- a date; period (optional) is the sum of the changes inside the last period,
+-- so the stock before the period is stock - period.
+--
+-- Numeric keys: count, sum, sum_sq and the derived fields as in stats_agg
+-- (mean and sum_sq_diff NULL when count = 0). With a period also
+--   "in" / "out": {count, sum} of the period's flows,
+--   change_pct = 100 * (sum - sum_prev) / |sum_prev|
+--   churn_pct  = 100 * (|in.sum| + |out.sum|) / |sum_prev|
+-- each rounded to 2 decimals half away from zero, NULL when sum_prev = 0.
+-- Counted keys: net counts (arr: net count); with a period also in/out flows.
+-- A key is shown when its stock is not empty or the period has flows for it.
+-- Fails fast when the stock or the previous stock is not a valid state.
+
+CREATE OR REPLACE FUNCTION jsonb_stats_delta_summary_plpgsql(stock jsonb, period jsonb DEFAULT NULL)
+RETURNS jsonb
+LANGUAGE plpgsql IMMUTABLE
+AS $jsonb_stats_delta_summary_plpgsql$
+DECLARE
+    st jsonb := jsonb_stats_delta_state_add_plpgsql('{}', stock, 1);
+    pe jsonb := jsonb_stats_delta_state_add_plpgsql('{}', period, 1);
+    result jsonb := jsonb_build_object('type', 'stats_agg', 'min_max', false);
+    key text; dt text; kind text; se jsonb; pe_e jsonb;
+    net jsonb; pnet jsonb; prev jsonb; pin jsonb; pout jsonb;
+    out_e jsonb;
+    c numeric; s numeric; q numeric; n_big numeric; s0 numeric;
+    variance numeric; stddev numeric; cv numeric;
+    k text; v jsonb; empty_period boolean;
+BEGIN
+    FOR key IN SELECT jsonb_object_keys(st) UNION SELECT jsonb_object_keys(pe) LOOP
+        se := st->key;
+        pe_e := pe->key;
+        IF se IS NOT NULL AND pe_e IS NOT NULL AND se->>'type' <> pe_e->>'type' THEN
+            RAISE EXCEPTION 'jsonb_stats: type mismatch for key ''%'': existing % vs incoming %',
+                key, se->>'type', pe_e->>'type';
+        END IF;
+        dt := COALESCE(se->>'type', pe_e->>'type');
+        kind := split_part(dt, '_', 1);
+        IF se IS NULL THEN
+            se := jsonb_build_object('type', dt,
+                'in', jsonb_stats_delta_flow_zero_plpgsql(dt), 'out', jsonb_stats_delta_flow_zero_plpgsql(dt));
+        END IF;
+        net := jsonb_stats_delta_flow_add_plpgsql(se->'in', se->'out', -1);
+        IF kind IN ('int', 'nat', 'dec2', 'float') THEN
+            net := jsonb_stats_delta_num_flow_plpgsql(dt, key, 'stock', net);
+        ELSE
+            net := jsonb_stats_delta_cat_flow_plpgsql(dt, key, 'stock', net);
+        END IF;
+        empty_period := pe_e IS NULL
+            OR (jsonb_stats_delta_flow_empty_plpgsql(pe_e->'in') AND jsonb_stats_delta_flow_empty_plpgsql(pe_e->'out'));
+        IF period IS NOT NULL THEN
+            IF pe_e IS NULL THEN
+                pin := jsonb_stats_delta_flow_zero_plpgsql(dt);
+                pout := pin;
+            ELSE
+                pin := pe_e->'in';
+                pout := pe_e->'out';
+            END IF;
+            pnet := jsonb_stats_delta_flow_add_plpgsql(pin, pout, -1);
+            prev := jsonb_stats_delta_flow_add_plpgsql(net, pnet, -1);
+            IF kind IN ('int', 'nat', 'dec2', 'float') THEN
+                prev := jsonb_stats_delta_num_flow_plpgsql(dt, key, 'previous stock', prev);
+                pin := jsonb_stats_delta_num_flow_plpgsql(dt, key, 'in', pin);
+                pout := jsonb_stats_delta_num_flow_plpgsql(dt, key, 'out', pout);
+            ELSE
+                prev := jsonb_stats_delta_cat_flow_plpgsql(dt, key, 'previous stock', prev);
+                pin := jsonb_stats_delta_cat_flow_plpgsql(dt, key, 'in', pin);
+                pout := jsonb_stats_delta_cat_flow_plpgsql(dt, key, 'out', pout);
+            END IF;
+        END IF;
+        IF jsonb_stats_delta_flow_empty_plpgsql(net) AND empty_period THEN
+            CONTINUE;
+        END IF;
+        IF kind IN ('int', 'nat', 'dec2', 'float') THEN
+            c := (net->>'count')::numeric;
+            s := (net->>'sum')::numeric;
+            q := (net->>'sum_sq')::numeric;
+            n_big := c * q - s * s;
+            variance := NULL; stddev := NULL; cv := NULL;
+            IF c > 1 THEN
+                variance := jsonb_stats_round2_ratio_plpgsql(n_big, c * (c - 1));
+                stddev := jsonb_stats_sqrt_round2_ratio_plpgsql(n_big, c * (c - 1));
+                IF s <> 0 THEN
+                    cv := sign(s) * jsonb_stats_sqrt_round2_ratio_plpgsql(10000 * n_big * c, (c - 1) * s * s);
+                END IF;
+            END IF;
+            out_e := jsonb_build_object(
+                'type', kind || '_agg', 'count', c, 'sum', net->'sum', 'sum_sq', net->'sum_sq',
+                'mean', CASE WHEN c > 0 THEN jsonb_stats_round2_ratio_plpgsql(s, c) END,
+                'sum_sq_diff', CASE WHEN c > 0 THEN jsonb_stats_round2_ratio_plpgsql(n_big, c) END,
+                'variance', variance, 'stddev', stddev,
+                'coefficient_of_variation_pct', cv);
+            IF period IS NOT NULL THEN
+                s0 := (prev->>'sum')::numeric;
+                out_e := out_e || jsonb_build_object(
+                    'in', jsonb_build_object('count', pin->'count', 'sum', pin->'sum'),
+                    'out', jsonb_build_object('count', pout->'count', 'sum', pout->'sum'),
+                    'change_pct', CASE WHEN s0 <> 0 THEN jsonb_stats_round2_ratio_plpgsql(100 * (s - s0), abs(s0)) END,
+                    'churn_pct', CASE WHEN s0 <> 0 THEN jsonb_stats_round2_ratio_plpgsql(
+                        100 * (abs((pin->>'sum')::numeric) + abs((pout->>'sum')::numeric)), abs(s0)) END);
+            END IF;
+        ELSE
+            out_e := jsonb_build_object('type', kind || '_agg') || net;
+            IF period IS NOT NULL THEN
+                out_e := out_e || jsonb_build_object('in', pin, 'out', pout);
+            END IF;
+        END IF;
+        result := result || jsonb_build_object(key, out_e);
+    END LOOP;
+    RETURN result;
+END;
+$jsonb_stats_delta_summary_plpgsql$;
