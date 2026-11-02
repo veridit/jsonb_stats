@@ -165,3 +165,33 @@ no extra allocation per row, bench vs jsonb_stats_merge_agg must not regress):
     `churn_pct` (denominator |previous sum|, null when 0). Counted kinds get
     net counts (and in/out counts with a period). Fails fast when the stock or
     the previous stock (stock - period) is invalid.
+
+### Morning report (overnight 2026-11-02/03)
+
+Done, committed on master, NOT tagged/pushed/released (awaiting review):
+- Spec (dev/reference_plpgsql.sql), Rust (src/delta.rs), oracle
+  (dev/delta_oracle.py -> dev/fixtures/delta_fixture.sql), tests
+  (src/tests_delta.rs, 8 tests), xarch checks, benchmark, docs
+  (README "Stock over time", ARCHITECTURE, CHANGELOG 3.1.0), version 3.1.0,
+  upgrade script sql/jsonb_stats--3.0.0--3.1.0.sql.
+- Verified: make test 110/110; make clippy (-D warnings) clean; fixture-check;
+  local upgrade 3.0.0 -> 3.1.0 gives a catalog identical to a fresh install.
+- Tests prove: running window == oracle for 24 months x (int, dec2, float,
+  nat, str) incl. in/out/change_pct/churn_pct; stock == jsonb_stats_agg of
+  alive units (minus min/max); entry+exit == empty; negate(negate)=to_delta;
+  order/grouping/parallel independence; rolling window (minvfunc) == fresh
+  sum; Rust == PL/pgSQL byte for byte; 11 fail-fast cases match reference.
+- Bench (M-series, pg18): delta_agg 67 ms vs merge_agg 50 ms on the same 1K
+  summaries (ratio 1.3, it carries two flows); Rust 404x PL/pgSQL.
+
+Toolchain note: Homebrew llvm 22 broke pgrx 0.16 bindgen ("no field
+rd_tableam"); Makefile now pins Apple's libclang (LIBCLANG_PATH).
+
+Open questions for you:
+1. churn_pct uses |in.sum| + |out.sum|. A unit changing 10 -> 12 counts as
+   out 10 + in 10+2, so value changes inflate churn (as in the example). If
+   you want births/deaths-only churn, statbus can emit changes as a separate
+   delta stream; or we add a "net change only" mode. Decide on real data.
+2. Delta for date_agg drops min/max like numeric (counts only).
+3. Name check: jsonb_stats_delta_summary vs e.g. jsonb_stats_delta_final.
+Then: tag v3.1.0 per release checklist, and integrate in statbus (STATBUS-558).
