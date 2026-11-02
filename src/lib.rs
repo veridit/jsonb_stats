@@ -127,6 +127,7 @@ mod tests {
     }
 
     include!("tests_exact.rs");
+    include!("tests_delta.rs");
 
     #[pg_test]
     fn test_extension_loads() {

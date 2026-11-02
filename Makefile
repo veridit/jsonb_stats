@@ -30,10 +30,12 @@ test:
 # Regenerate the exact-oracle fixture used by src/tests_exact.rs
 fixture:
 	python3 dev/exact_oracle.py > dev/fixtures/exact_fixture.sql
+	cd dev && python3 delta_oracle.py > fixtures/delta_fixture.sql
 
 # Fail if the committed fixture is stale relative to dev/exact_oracle.py
 fixture-check:
 	python3 dev/exact_oracle.py | diff -q - dev/fixtures/exact_fixture.sql
+	cd dev && python3 delta_oracle.py | diff -q - fixtures/delta_fixture.sql
 
 # Cross-architecture determinism check (needs Docker). Builds the extension for
 # linux arm64 (native) and x86_64 (cross), runs dev/xarch_checks*.sql on both
