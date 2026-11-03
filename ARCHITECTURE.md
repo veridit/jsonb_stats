@@ -104,8 +104,7 @@ Why two flows instead of one signed state: each flow is a sum of real
 summaries, so it is always a valid state and can be checked on every input;
 negative counts only exist in the stock, and are rejected when a stock is read
 (`jsonb_stats_delta_to_agg`). The flows also give what was added and
-removed in a period for free. Why units entered or left (birth, death, move)
-is counted by the caller, not per variable.
+removed in a period for free.
 
 Exactness: adding flows only adds exact decimals and integers, so sums are
 associative and commutative, and the moving-aggregate inverse

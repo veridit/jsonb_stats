@@ -447,21 +447,15 @@ variables get `count`, `sum`, `sum_sq`, `mean`, `sum_sq_diff`, `variance`,
 give for the units alive. With a `period` (the changes inside the last
 period) they also get:
 
-| Field | Meaning | Like (counts) |
-|-------|---------|---------------|
-| `in` / `out` | `count` and `sum` added to / removed from this stock in the period | |
-| `change_pct` | `100 · (sum − sum_before) / \|sum_before\|`, net change | `exists_change` |
+| Field | Meaning |
+|-------|---------|
+| `in` / `out` | `count` and `sum` added to / removed from this stock in the period |
+| `change_pct` | `100 · (sum − sum_before) / \|sum_before\|`, net change |
 
 `sum_before = sum − in.sum + out.sum`, so one row is enough, no lag needed.
 `change_pct` is unit-free, so variables of any scale can be ranked side by
 side, next to the coefficient of variation, which finds cells whose units are
 unusually spread out. NULL when `sum_before` is 0.
-
-Why something entered or left (birth, death, moving between cells, a value
-change) is not part of the summary. Those are counts of units, which the
-caller keeps once, next to the stock (as STATBUS does with births, deaths and
-`*_change_count`); repeating them inside every variable would add nothing a
-statistician needs and make each variable harder to read.
 
 `jsonb_stats_delta_agg` is parallel safe and a moving aggregate: a sliding
 window such as `ROWS BETWEEN 11 PRECEDING AND CURRENT ROW` (rolling 12
