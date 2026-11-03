@@ -122,3 +122,18 @@ Open for the owner:
    these as 3.2.0. Master has both in 3.1.0 now.
 2. hibiscus is told once now (owner's instruction), for later use, not for
    the first prototype.
+
+### Release, once the owner chooses (nothing tagged yet)
+
+Option A, one release 3.1.0 (master as is, HEAD):
+    git tag -a v3.1.0 -m "jsonb_stats 3.1.0: stats_delta, values, compare" && git push origin v3.1.0
+    awk '/^## 3.1.0/{f=1;next} /^## /{if(f)exit} f' CHANGELOG.md > /tmp/notes.md
+    gh release create v3.1.0 -R veridit/jsonb_stats --title "jsonb_stats 3.1.0" --notes-file /tmp/notes.md --verify-tag
+
+Option B, 3.1.0 = deltas (commit 17779bd, before values/compare) and 3.2.0 =
+values/compare: needs a new commit on master first (version 3.2.0 in
+Cargo.toml, move the two functions from sql/jsonb_stats--3.0.0--3.1.0.sql to
+a new jsonb_stats--3.1.0--3.2.0.sql, split the CHANGELOG section), then
+re-run make test / xarch / upgrade-test (OLD_REF=v3.1.0 and v3.0.0) before
+tagging both. Note: 17779bd's 3.1.0 upgrade script would then differ from
+master's, so v3.1.0 must be tagged at 17779bd, not at HEAD.
