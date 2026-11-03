@@ -129,7 +129,7 @@ churn_pct 11.2 (very turbulent: worth zooming in).
 Whether a window's flows are "in this period" or "in the frame" follows the
 frame: a plain running window accumulates flows since start, so statbus uses
 the per-period delta row (GROUP BY month) for flows and the window for stock.
-Final function: jsonb_stats_delta_summary(stock, period) takes both (the
+Final function: jsonb_stats_delta_to_agg(stock, period) takes both (the
 window sum as stock, the month's delta as period).
 
 Steps (commit after each, performance: same i128 fast path as merge_agg,
@@ -162,7 +162,7 @@ flows, not "no regression"):
   - `jsonb_stats_delta_merge(a, b) -> stats_delta` (scalar add)
   - `jsonb_stats_delta_agg(stats_delta) -> stats_delta` (Internal state, parallel,
     moving-aggregate inverse for windows)
-  - `jsonb_stats_delta_summary(stock stats_delta[, period stats_delta]) -> stats_agg`
+  - `jsonb_stats_delta_to_agg(stock stats_delta[, period stats_delta]) -> stats_agg`
     with `"min_max": false`: per numeric key count, sum, sum_sq, mean,
     sum_sq_diff, variance, stddev, CV (as today, mean/sum_sq_diff null when
     count 0); with a period also `in`/`out` {count, sum}, `change_pct`,
@@ -205,7 +205,7 @@ Acceptance check against STATBUS itself: rebuilt the facet history from
 statistical_unit with STATBUS's own existence rule (used_for_counting,
 unit_existence_from/until, the 8 facet dimensions) as 12,290 delta rows
 (vs 298,264 stored year-month facet rows). For every stored row of
-public.statistical_history_facet, jsonb_stats_delta_summary of the running
+public.statistical_history_facet, jsonb_stats_delta_to_agg of the running
 sum to the month end equals the stored stats_summary (all keys, minus
 min/max, numeric value equality): 298,264 / 298,264. Read-only; data copied
 to a scratch db. Limitation: the local data has all events in 2025-01, so
@@ -222,5 +222,5 @@ Open questions for you:
 3. Float printing: delta stocks print float sum/sum_sq trimmed (see above),
    so they are not text-identical to jsonb_stats_agg. Needed for
    path-independence; tell me if statbus compares text.
-4. Name check: jsonb_stats_delta_summary vs e.g. jsonb_stats_delta_final.
+4. Name check: jsonb_stats_delta_to_agg vs e.g. jsonb_stats_delta_final_internal.
 Then: tag v3.1.0 per release checklist, and integrate in statbus (STATBUS-558).

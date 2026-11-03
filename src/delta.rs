@@ -489,7 +489,7 @@ impl DeltaState {
             ),
         }
         if matches!(m.get("min_max"), Some(Value::Bool(false))) {
-            pgrx::error!("jsonb_stats: a stats_agg without min/max (from jsonb_stats_delta_summary) is a result, not an input");
+            pgrx::error!("jsonb_stats: a stats_agg without min/max (from jsonb_stats_delta_to_agg) is a result, not an input");
         }
         for (key, summary) in m {
             if key == "type" {
@@ -599,8 +599,8 @@ fn flow_brief(kind: DKind, f: &Flow) -> Value {
     }
 }
 
-/// Spec: jsonb_stats_delta_summary_plpgsql
-fn delta_summary(stock: Value, period: Option<Value>) -> Value {
+/// Spec: jsonb_stats_delta_to_agg_plpgsql
+fn delta_to_agg(stock: Value, period: Option<Value>) -> Value {
     let st = state_of(stock);
     let has_period = period.is_some();
     let pe = period.map(state_of).unwrap_or_default();
@@ -718,14 +718,14 @@ pub fn jsonb_stats_delta_merge(a: JsonB, b: JsonB) -> JsonB {
 
 /// A stock (sum of all deltas up to a date) as a stats_agg without min/max,
 /// with flows and change/churn rates for an optional period (the sum of the
-/// deltas inside the last period). Spec: jsonb_stats_delta_summary_plpgsql
+/// deltas inside the last period). Spec: jsonb_stats_delta_to_agg_plpgsql
 #[pg_extern(immutable, parallel_safe)]
-pub fn jsonb_stats_delta_summary(
+pub fn jsonb_stats_delta_to_agg(
     stock: Option<JsonB>,
     period: default!(Option<JsonB>, "NULL"),
 ) -> Option<JsonB> {
     let stock = stock?;
-    Some(JsonB(delta_summary(stock.0, period.map(|p| p.0))))
+    Some(JsonB(delta_to_agg(stock.0, period.map(|p| p.0))))
 }
 
 unsafe fn state_ptr(internal: Internal) -> *mut DeltaState {
@@ -808,7 +808,7 @@ pub unsafe fn jsonb_stats_delta_deserial(bytes: Vec<u8>, _internal: Internal) ->
 /// # Safety
 /// `internal` must be NULL or a `DeltaState` pointer created by this extension.
 #[pg_extern(immutable, parallel_safe)]
-pub unsafe fn jsonb_stats_delta_final(internal: Internal) -> JsonB {
+pub unsafe fn jsonb_stats_delta_final_internal(internal: Internal) -> JsonB {
     match internal.unwrap() {
         Some(d) => JsonB(unsafe { &*d.cast_mut_ptr::<DeltaState>() }.to_delta()),
         None => JsonB(json!({"type": "stats_delta"})),

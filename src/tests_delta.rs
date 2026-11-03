@@ -31,14 +31,14 @@ const RUNNING_SUMMARY: &str = "
     WITH p AS (SELECT month, jsonb_stats_delta_agg(d) AS d FROM delta_events GROUP BY month),
     m AS (SELECT g AS month, coalesce(p.d, '{\"type\": \"stats_delta\"}') AS d
           FROM generate_series(1, 24) AS g LEFT JOIN p ON p.month = g)
-    SELECT month, jsonb_stats_delta_summary(jsonb_stats_delta_agg(d) OVER (ORDER BY month), d) FROM m";
+    SELECT month, jsonb_stats_delta_to_agg(jsonb_stats_delta_agg(d) OVER (ORDER BY month), d) FROM m";
 
 #[pg_test]
 fn test_delta_running_sum_matches_oracle() {
     load_delta_fixture();
     assert_eq!(delta_mismatches(RUNNING_SUMMARY), "", "running window vs oracle");
     // Same stock built without a window: all events up to the month.
-    let direct = "SELECT g, jsonb_stats_delta_summary(
+    let direct = "SELECT g, jsonb_stats_delta_to_agg(
             (SELECT jsonb_stats_delta_agg(d ORDER BY md5(unit::text || month)) FROM delta_events WHERE month <= g),
             coalesce((SELECT jsonb_stats_delta_agg(d) FROM delta_events WHERE month = g), '{\"type\": \"stats_delta\"}'))
         FROM generate_series(1, 24) AS g";
@@ -52,7 +52,7 @@ fn test_delta_stock_equals_alive_units() {
     // at that month, without min/max.
     let diffs = sql_text(
         "WITH s AS (
-            SELECT g AS month, jsonb_stats_delta_summary(
+            SELECT g AS month, jsonb_stats_delta_to_agg(
                 (SELECT jsonb_stats_delta_agg(d) FROM delta_events WHERE month <= g)) AS stock,
                 (SELECT jsonb_stats_agg(stats) FROM delta_units
                   WHERE month_from <= g AND (month_to IS NULL OR g < month_to)) AS alive
@@ -71,7 +71,7 @@ fn test_delta_round_trip_and_order() {
     // Entry then exit returns exactly to the empty stock, for every unit.
     let not_empty = sql_text(
         "SELECT count(*)::text FROM delta_units
-         WHERE jsonb_stats_delta_summary(jsonb_stats_delta_merge(
+         WHERE jsonb_stats_delta_to_agg(jsonb_stats_delta_merge(
                    jsonb_stats_to_delta(stats), jsonb_stats_negate(stats)))::text
                <> '{\"type\": \"stats_agg\", \"min_max\": false}'",
     );
@@ -130,10 +130,10 @@ fn test_delta_parallel_matches_serial() {
     );
     // 200 copies of every event: the stock is 200 times the original.
     let x1 = sql_text(
-        "SELECT jsonb_stats_delta_summary(jsonb_stats_delta_agg(d))->'emp'->>'sum' FROM delta_events",
+        "SELECT jsonb_stats_delta_to_agg(jsonb_stats_delta_agg(d))->'emp'->>'sum' FROM delta_events",
     );
     let x200 = sql_text(
-        "SELECT jsonb_stats_delta_summary(jsonb_stats_delta_agg(d))->'emp'->>'sum' FROM delta_x200",
+        "SELECT jsonb_stats_delta_to_agg(jsonb_stats_delta_agg(d))->'emp'->>'sum' FROM delta_x200",
     );
     assert_eq!(
         x200,
@@ -170,7 +170,7 @@ fn test_delta_reference_parity() {
     load_delta_fixture();
     let reference = RUNNING_SUMMARY
         .replace("jsonb_stats_delta_agg(", "jsonb_stats_delta_agg_plpgsql(")
-        .replace("jsonb_stats_delta_summary(", "jsonb_stats_delta_summary_plpgsql(");
+        .replace("jsonb_stats_delta_to_agg(", "jsonb_stats_delta_to_agg_plpgsql(");
     assert_eq!(delta_mismatches(&reference), "", "reference running window vs oracle");
     for (rust, refr) in [
         ("jsonb_stats_to_delta(stats)", "jsonb_stats_to_delta_plpgsql(stats)"),
@@ -181,8 +181,8 @@ fn test_delta_reference_parity() {
             "jsonb_stats_delta_merge_plpgsql(jsonb_stats_to_delta_plpgsql(stats), jsonb_stats_negate_plpgsql(stats))",
         ),
         (
-            "jsonb_stats_delta_summary(jsonb_stats_to_delta(stats), jsonb_stats_to_delta(stats))",
-            "jsonb_stats_delta_summary_plpgsql(jsonb_stats_to_delta_plpgsql(stats), jsonb_stats_to_delta_plpgsql(stats))",
+            "jsonb_stats_delta_to_agg(jsonb_stats_to_delta(stats), jsonb_stats_to_delta(stats))",
+            "jsonb_stats_delta_to_agg_plpgsql(jsonb_stats_to_delta_plpgsql(stats), jsonb_stats_to_delta_plpgsql(stats))",
         ),
     ] {
         let diffs = sql_text(&format!(
@@ -210,7 +210,7 @@ fn test_delta_shapes_and_rates() {
     // The example from todo.md: stock 50,000 employees; 30 births bring 600,
     // 20 deaths take 900, size changes move 2,000 -> 2,100.
     let s = sql_text(
-        r#"SELECT ((jsonb_stats_delta_summary(
+        r#"SELECT ((jsonb_stats_delta_to_agg(
             '{"type": "stats_delta", "emp": {"type": "int_delta",
                "in": {"count": 1080, "sum": 52700, "sum_sq": 52700000},
                "out": {"count": 70, "sum": 2900, "sum_sq": 300000}}}'::jsonb,
@@ -235,7 +235,7 @@ fn test_delta_shapes_and_rates() {
     // Empty inputs
     assert_eq!(sql_text("SELECT jsonb_stats_delta_agg(NULL::jsonb)::text"), r#"{"type": "stats_delta"}"#);
     assert_eq!(
-        sql_text(r#"SELECT jsonb_stats_delta_summary('{"type": "stats_delta"}')::text"#),
+        sql_text(r#"SELECT jsonb_stats_delta_to_agg('{"type": "stats_delta"}')::text"#),
         r#"{"type": "stats_agg", "min_max": false}"#
     );
 }
@@ -246,13 +246,13 @@ fn test_delta_invalid_input_fails_fast() {
     let cases = [
         // A stock that is only an exit is not a valid stock.
         (
-            r#"SELECT jsonb_stats_delta_summary(jsonb_stats_negate('{"type": "stats", "e": {"type": "int", "value": 3}}'))"#,
+            r#"SELECT jsonb_stats_delta_to_agg(jsonb_stats_negate('{"type": "stats", "e": {"type": "int", "value": 3}}'))"#,
             "jsonb_stats: int_delta for key 'e' has an invalid 'stock' flow: count must be an integer >= 0",
         ),
         // The previous stock (stock - period) must be valid too: an entry in
         // the period that is not in the stock.
         (
-            r#"SELECT jsonb_stats_delta_summary('{"type": "stats_delta"}', jsonb_stats_to_delta('{"type": "stats", "e": {"type": "int", "value": 3}}'))"#,
+            r#"SELECT jsonb_stats_delta_to_agg('{"type": "stats_delta"}', jsonb_stats_to_delta('{"type": "stats", "e": {"type": "int", "value": 3}}'))"#,
             "jsonb_stats: int_delta for key 'e' has an invalid 'previous stock' flow: count must be an integer >= 0",
         ),
         (
@@ -277,7 +277,7 @@ fn test_delta_invalid_input_fails_fast() {
         ),
         (
             r#"SELECT jsonb_stats_to_delta('{"type": "stats_agg", "min_max": false}')"#,
-            "jsonb_stats: a stats_agg without min/max (from jsonb_stats_delta_summary) is a result, not an input",
+            "jsonb_stats: a stats_agg without min/max (from jsonb_stats_delta_to_agg) is a result, not an input",
         ),
         (
             r#"SELECT jsonb_stats_to_delta('{"type": "stats", "min_max": {"type": "int", "value": 1}}')"#,
@@ -295,7 +295,7 @@ fn test_delta_invalid_input_fails_fast() {
     for (q, msg) in cases {
         assert_eq!(sql_error(q), msg, "{q}");
         let refq = q
-            .replace("jsonb_stats_delta_summary(", "jsonb_stats_delta_summary_plpgsql(")
+            .replace("jsonb_stats_delta_to_agg(", "jsonb_stats_delta_to_agg_plpgsql(")
             .replace("jsonb_stats_to_delta(", "jsonb_stats_to_delta_plpgsql(")
             .replace("jsonb_stats_negate(", "jsonb_stats_negate_plpgsql(")
             .replace("jsonb_stats_delta_merge(", "jsonb_stats_delta_merge_plpgsql(");

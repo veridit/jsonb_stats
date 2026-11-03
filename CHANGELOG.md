@@ -11,7 +11,7 @@ time".
 - `jsonb_stats_to_delta`, `jsonb_stats_negate`, `jsonb_stats_delta_merge`.
 - `jsonb_stats_delta_agg`: parallel safe, and a moving aggregate (sliding
   window frames subtract instead of recomputing).
-- `jsonb_stats_delta_summary(stock, period)`: the stock as a `stats_agg`
+- `jsonb_stats_delta_to_agg(stock, period)`: the stock as a `stats_agg`
   marked `"min_max": false`, with the period's `in`/`out` flows and the
   unit-free rates `change_pct` and `churn_pct` next to the coefficient of
   variation.

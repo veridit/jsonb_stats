@@ -3,7 +3,7 @@
 
 Simulates units entering, changing value and leaving a stock over 24 months,
 and computes with exact rational arithmetic what
-jsonb_stats_delta_summary(stock up to month m, changes in month m) must return.
+jsonb_stats_delta_to_agg(stock up to month m, changes in month m) must return.
 Generates dev/fixtures/delta_fixture.sql:
 
     python3 dev/delta_oracle.py > dev/fixtures/delta_fixture.sql

@@ -103,7 +103,7 @@ for arr). The stock is `in − out`.
 Why two flows instead of one signed state: each flow is a sum of real
 summaries, so it is always a valid state and can be checked on every input;
 negative counts only exist in the stock, and are rejected when a stock is read
-(`jsonb_stats_delta_summary`). The flows also give gross entries/exits
+(`jsonb_stats_delta_to_agg`). The flows also give gross entries/exits
 (churn) for free.
 
 Exactness: adding flows only adds exact decimals and integers, so sums are
@@ -113,7 +113,7 @@ form makes the bytes path-independent: int/nat sums at scale 0, dec2 at 2/4,
 float trimmed of trailing zeros (a float sum's scale would otherwise depend on
 which values were ever added); zero counts and empty flows are dropped.
 
-min/max are not kept (not invertible). `jsonb_stats_delta_summary` marks its
+min/max are not kept (not invertible). `jsonb_stats_delta_to_agg` marks its
 output `"min_max": false`, and that output is refused as an input.
 
 `DeltaState` is the Internal state for the aggregate (sfunc = msfunc,

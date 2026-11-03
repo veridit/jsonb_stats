@@ -14,9 +14,9 @@ mod state;
 // Re-export all pg_extern functions so pgrx can discover them
 pub use accum::{jsonb_stats_accum, jsonb_stats_accum_sfunc};
 pub use delta::{
-    jsonb_stats_delta_combine, jsonb_stats_delta_deserial, jsonb_stats_delta_final,
+    jsonb_stats_delta_combine, jsonb_stats_delta_deserial, jsonb_stats_delta_final_internal,
     jsonb_stats_delta_merge, jsonb_stats_delta_minvfunc, jsonb_stats_delta_serial,
-    jsonb_stats_delta_sfunc, jsonb_stats_delta_summary, jsonb_stats_negate, jsonb_stats_to_delta,
+    jsonb_stats_delta_sfunc, jsonb_stats_delta_to_agg, jsonb_stats_negate, jsonb_stats_to_delta,
 };
 pub use final_fn::{jsonb_stats_final, jsonb_stats_final_internal};
 pub use merge::{jsonb_stats_merge, jsonb_stats_merge_sfunc};
@@ -94,14 +94,14 @@ extension_sql!(
 CREATE AGGREGATE jsonb_stats_delta_agg(jsonb) (
     sfunc = jsonb_stats_delta_sfunc,
     stype = internal,
-    finalfunc = jsonb_stats_delta_final,
+    finalfunc = jsonb_stats_delta_final_internal,
     combinefunc = jsonb_stats_delta_combine,
     serialfunc = jsonb_stats_delta_serial,
     deserialfunc = jsonb_stats_delta_deserial,
     msfunc = jsonb_stats_delta_sfunc,
     minvfunc = jsonb_stats_delta_minvfunc,
     mstype = internal,
-    mfinalfunc = jsonb_stats_delta_final,
+    mfinalfunc = jsonb_stats_delta_final_internal,
     parallel = safe
 );
 "#,
@@ -109,7 +109,7 @@ CREATE AGGREGATE jsonb_stats_delta_agg(jsonb) (
     requires = [
         jsonb_stats_delta_sfunc,
         jsonb_stats_delta_minvfunc,
-        jsonb_stats_delta_final,
+        jsonb_stats_delta_final_internal,
         jsonb_stats_delta_combine,
         jsonb_stats_delta_serial,
         jsonb_stats_delta_deserial

@@ -675,7 +675,7 @@ BEGIN
         RAISE EXCEPTION 'jsonb_stats: expected stats, stats_agg or stats_delta, got type %', d->'type';
     END IF;
     IF d->'min_max' = 'false' THEN
-        RAISE EXCEPTION 'jsonb_stats: a stats_agg without min/max (from jsonb_stats_delta_summary) is a result, not an input';
+        RAISE EXCEPTION 'jsonb_stats: a stats_agg without min/max (from jsonb_stats_delta_to_agg) is a result, not an input';
     END IF;
     FOR key, summary IN SELECT * FROM jsonb_each(d) LOOP
         IF key = 'type' THEN CONTINUE; END IF;
@@ -813,9 +813,9 @@ CREATE AGGREGATE jsonb_stats_delta_agg_plpgsql(jsonb) (
     parallel = safe
 );
 
--- ── Reading a stock: jsonb_stats_delta_summary ──
+-- ── Reading a stock: jsonb_stats_delta_to_agg ──
 --
--- jsonb_stats_delta_summary(stock, period) turns a running sum of deltas into
+-- jsonb_stats_delta_to_agg(stock, period) turns a running sum of deltas into
 -- a stats_agg marked "min_max": false. stock is the sum of all changes up to
 -- a date; period (optional) is the sum of the changes inside the last period,
 -- so the stock before the period is stock - period.
@@ -830,10 +830,10 @@ CREATE AGGREGATE jsonb_stats_delta_agg_plpgsql(jsonb) (
 -- A key is shown when its stock is not empty or the period has flows for it.
 -- Fails fast when the stock or the previous stock is not a valid state.
 
-CREATE OR REPLACE FUNCTION jsonb_stats_delta_summary_plpgsql(stock jsonb, period jsonb DEFAULT NULL)
+CREATE OR REPLACE FUNCTION jsonb_stats_delta_to_agg_plpgsql(stock jsonb, period jsonb DEFAULT NULL)
 RETURNS jsonb
 LANGUAGE plpgsql IMMUTABLE
-AS $jsonb_stats_delta_summary_plpgsql$
+AS $jsonb_stats_delta_to_agg_plpgsql$
 DECLARE
     st jsonb := jsonb_stats_delta_state_add_plpgsql('{}', stock, 1);
     pe jsonb := jsonb_stats_delta_state_add_plpgsql('{}', period, 1);
@@ -927,4 +927,4 @@ BEGIN
     END LOOP;
     RETURN result;
 END;
-$jsonb_stats_delta_summary_plpgsql$;
+$jsonb_stats_delta_to_agg_plpgsql$;
