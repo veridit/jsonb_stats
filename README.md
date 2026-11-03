@@ -433,6 +433,12 @@ flow is a valid summary on its own:
 A unit that changes value (10 to 12 employees) is an exit of the old version
 and an entry of the new one. Empty flows are omitted.
 
+`jsonb_stats_negate` records an exit; it is not an undo. Adding an entry and
+its negation nets the stock to zero but leaves both flows (`in` and `out`)
+in the period, as for a unit that really entered and left. To correct data,
+delete the wrong events and insert new ones (keep events per unit), rather
+than adding negations to stored totals.
+
 `jsonb_stats_delta_to_agg(stock, period)` reads a stock as a `stats_agg`
 marked `"min_max": false` (min and max cannot be undone when a unit leaves; for
 exact min/max at a date, aggregate the units alive at that date). Numeric
@@ -549,7 +555,7 @@ While this adds a level of nesting compared to working with raw `jsonb` values, 
 | `jsonb_stats_to_agg(stats jsonb)` | Convert a single `stats` → `stats_agg` (for merging with existing aggregates) |
 | `jsonb_stats_merge(a jsonb, b jsonb)` | Binary merge of two `stats_agg` objects (no aggregate context needed). Returns a finalized `stats_agg`, safe to store and merge again |
 | `jsonb_stats_to_delta(x jsonb)` | Entry event: a `stats_agg` (or `stats`, or `stats_delta`) as a `stats_delta` |
-| `jsonb_stats_negate(x jsonb)` | Exit event: the negation (in and out swapped) |
+| `jsonb_stats_negate(x jsonb)` | Exit event: in and out swapped. Not an undo: an entry plus its negation leaves both flows |
 | `jsonb_stats_delta_merge(a jsonb, b jsonb)` | Sum of two deltas |
 | `jsonb_stats_delta_to_agg(stock jsonb, period jsonb DEFAULT NULL)` | A stock as a `stats_agg` with `"min_max": false`, plus `in`/`out` and `change_pct` for the period. Fails if the stock or the stock before the period is negative or inconsistent |
 | `jsonb_stats_accum(state jsonb, stats jsonb)` | Low-level: accumulate one `stats` into running state (numeric entries carry only `count`, `sum`, `sum_sq`, `min`, `max`) |
