@@ -29,8 +29,8 @@ the CLAUDE.md checklist (tag v3.1.0, GitHub release).
 
 ## Finding what stands out: `jsonb_stats_values` and `jsonb_stats_compare`
 
-Status: building overnight 2026-11-03/04 (owner asleep). Push master, NO tag;
-3.1 vs 3.2 decided in the morning. Tell hibiscus only after the owner says.
+Status: DONE overnight 2026-11-03/04, pushed to master, NOT tagged (3.1 vs 3.2
+decided in the morning). See "Morning report" below.
 
 Purpose: help a statistician find units and aggregates that stand out
 (errors and phenomena), independent of the variable's scale. Peer groups,
@@ -77,3 +77,35 @@ Per key:
 - All rounded to 2 decimals half away from zero, from exact integers.
 - Errors: type mismatch for a key (int vs float, numeric vs counted); invalid
   summaries as in stats_agg parsing.
+
+### Morning report (2026-11-04)
+
+Built: `jsonb_stats_values` and `jsonb_stats_compare`, as designed above.
+Spec (dev/reference_plpgsql.sql), Rust (src/compare.rs), oracle
+(dev/compare_oracle.py, textbook definitions: variance from the values, not
+from sum_sq, so it also checks the z formula), 9 tests (src/tests_compare.rs),
+xarch checks, upgrade script, README "Finding what stands out", ARCHITECTURE,
+CHANGELOG (in the 3.1.0 section).
+
+Verified: make test 118/118; clippy -D warnings; fixture-check; xarch
+IDENTICAL (amd64 = arm64, incl. new checks); upgrade-test from v3.0.0; local
+3.0.0 -> UPDATE catalog = fresh install (33 functions, incl. volatility,
+parallel, strict). Oracle: 53/53 compare cases (13 edge + 40 random) exact.
+
+Real data (read-only copy of statbus_local, 201,925 units; only variable
+there is employees): values unpacks all units in 1.7 s; robust peer outliers
+(median/IQR per unit type x 2-digit activity, peers >= 20) in 0.3 s, 10,472
+flagged; compare of 42 activity cells against all units of their type in
+3 ms. Not tested on real data: change between two periods (local data has one
+period).
+
+Found and fixed on the way: a stats_agg read from deltas (`"min_max": false`)
+has no min/max, which the existing parser rejects. values/compare now accept
+that only when the summary is marked; a plain stats_agg without min/max still
+fails.
+
+Open for the owner:
+1. Release as 3.1.0 (one release with deltas) or tag the deltas as 3.1.0 and
+   these as 3.2.0. Master has both in 3.1.0 now.
+2. hibiscus is told once now (owner's instruction), for later use, not for
+   the first prototype.
