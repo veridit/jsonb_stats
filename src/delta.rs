@@ -656,20 +656,17 @@ fn delta_to_agg(stock: Value, period: Option<Value>) -> Value {
                 if let Some((prev, pin, pout)) = &flows {
                     let (
                         Flow::Num { sum: s0, .. },
-                        Flow::Num { sum: si, .. },
-                        Flow::Num { sum: so, .. },
+                        Flow::Num { .. },
+                        Flow::Num { .. },
                     ) = (prev, pin, pout)
                     else {
                         unreachable!()
                     };
                     let mut change = sum.clone();
                     change.add_signed(s0, true);
-                    let mut churn = si.clone().abs();
-                    churn.add_assign(&so.clone().abs());
                     m.insert("in".into(), flow_brief(kind, pin));
                     m.insert("out".into(), flow_brief(kind, pout));
                     m.insert("change_pct".into(), pct(&change, s0));
-                    m.insert("churn_pct".into(), pct(&churn, s0));
                 }
                 m
             }
@@ -717,7 +714,7 @@ pub fn jsonb_stats_delta_merge(a: JsonB, b: JsonB) -> JsonB {
 }
 
 /// A stock (sum of all deltas up to a date) as a stats_agg without min/max,
-/// with flows and change/churn rates for an optional period (the sum of the
+/// with flows and change rate for an optional period (the sum of the
 /// deltas inside the last period). Spec: jsonb_stats_delta_to_agg_plpgsql
 #[pg_extern(immutable, parallel_safe)]
 pub fn jsonb_stats_delta_to_agg(

@@ -83,12 +83,11 @@ def num_summary(kind, stock, period):
     else:
         out["variance"] = out["stddev"] = out["coefficient_of_variation_pct"] = None
     fin, fout = period
-    si, so = frac(fin.s), frac(fout.s)
+    si, so = frac(fin.s), frac(fout.s)  # sum before = S1 - in + out
     s0 = S1 - si + so
     out["in"] = {"count": fin.n, "sum": fmt(canon(kind, fin.s))}
     out["out"] = {"count": fout.n, "sum": fmt(canon(kind, fout.s))}
     out["change_pct"] = cents(100 * (S1 - s0) / abs(s0)) if s0 else None
-    out["churn_pct"] = cents(100 * (abs(si) + abs(so)) / abs(s0)) if s0 else None
     return out
 
 

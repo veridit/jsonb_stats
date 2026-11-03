@@ -207,8 +207,8 @@ fn test_delta_reference_parity() {
 
 #[pg_test]
 fn test_delta_shapes_and_rates() {
-    // The example from todo.md: stock 50,000 employees; 30 births bring 600,
-    // 20 deaths take 900, size changes move 2,000 -> 2,100.
+    // Stock 50,000 employees; this period 80 units entered with 2,700 and 70
+    // left with 2,900 (entry/exit reasons are counted by the caller).
     let s = sql_text(
         r#"SELECT ((jsonb_stats_delta_to_agg(
             '{"type": "stats_delta", "emp": {"type": "int_delta",
@@ -221,7 +221,7 @@ fn test_delta_shapes_and_rates() {
     );
     assert_eq!(
         s,
-        r#"{"in": {"sum": 2700, "count": 80}, "out": {"sum": 2900, "count": 70}, "sum": 49800, "mean": 49.31, "type": "int_agg", "count": 1010, "churn_pct": 11.20, "change_pct": -0.40}"#
+        r#"{"in": {"sum": 2700, "count": 80}, "out": {"sum": 2900, "count": 70}, "sum": 49800, "mean": 49.31, "type": "int_agg", "count": 1010, "change_pct": -0.40}"#
     );
     // Shapes: empty flows are omitted, float trailing zeros trimmed, dec2 scale kept.
     assert_eq!(

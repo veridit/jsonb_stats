@@ -824,8 +824,7 @@ CREATE AGGREGATE jsonb_stats_delta_agg_plpgsql(jsonb) (
 -- (mean and sum_sq_diff NULL when count = 0). With a period also
 --   "in" / "out": {count, sum} of the period's flows,
 --   change_pct = 100 * (sum - sum_prev) / |sum_prev|
---   churn_pct  = 100 * (|in.sum| + |out.sum|) / |sum_prev|
--- each rounded to 2 decimals half away from zero, NULL when sum_prev = 0.
+-- rounded to 2 decimals half away from zero, NULL when sum_prev = 0.
 -- Counted keys: net counts (arr: net count); with a period also in/out flows.
 -- A key is shown when its stock is not empty or the period has flows for it.
 -- Fails fast when the stock or the previous stock is not a valid state.
@@ -913,9 +912,7 @@ BEGIN
                 out_e := out_e || jsonb_build_object(
                     'in', jsonb_build_object('count', pin->'count', 'sum', pin->'sum'),
                     'out', jsonb_build_object('count', pout->'count', 'sum', pout->'sum'),
-                    'change_pct', CASE WHEN s0 <> 0 THEN jsonb_stats_round2_ratio_plpgsql(100 * (s - s0), abs(s0)) END,
-                    'churn_pct', CASE WHEN s0 <> 0 THEN jsonb_stats_round2_ratio_plpgsql(
-                        100 * (abs((pin->>'sum')::numeric) + abs((pout->>'sum')::numeric)), abs(s0)) END);
+                    'change_pct', CASE WHEN s0 <> 0 THEN jsonb_stats_round2_ratio_plpgsql(100 * (s - s0), abs(s0)) END);
             END IF;
         ELSE
             out_e := jsonb_build_object('type', kind || '_agg') || net;

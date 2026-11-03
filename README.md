@@ -443,18 +443,19 @@ period) they also get:
 
 | Field | Meaning | Like (counts) |
 |-------|---------|---------------|
-| `in` / `out` | `count` and `sum` that entered / left in the period | `exists_added_count` / `exists_removed_count` |
+| `in` / `out` | `count` and `sum` added to / removed from this stock in the period | |
 | `change_pct` | `100 · (sum − sum_before) / \|sum_before\|`, net change | `exists_change` |
-| `churn_pct` | `100 · (\|in.sum\| + \|out.sum\|) / \|sum_before\|`, gross turnover | added + removed |
 
 `sum_before = sum − in.sum + out.sum`, so one row is enough, no lag needed.
-Both rates are unit-free, so variables of any scale can be ranked side by
-side: `change_pct` finds cells that grew or shrank, `churn_pct` finds cells
-with much movement even when the net is flat, and the coefficient of variation
-finds cells whose units are unusually spread out. Rates are NULL when
-`sum_before` is 0. Example: a cell with 50,000 employees where births bring 600,
-deaths take 900 and size changes move 2,000 to 2,100 has `change_pct = -0.40`
-(looks quiet) and `churn_pct = 11.20` (worth a look).
+`change_pct` is unit-free, so variables of any scale can be ranked side by
+side, next to the coefficient of variation, which finds cells whose units are
+unusually spread out. NULL when `sum_before` is 0.
+
+Why something entered or left (birth, death, moving between cells, a value
+change) is not part of the summary. Those are counts of units, which the
+caller keeps once, next to the stock (as STATBUS does with births, deaths and
+`*_change_count`); repeating them inside every variable would add nothing a
+statistician needs and make each variable harder to read.
 
 `jsonb_stats_delta_agg` is parallel safe and a moving aggregate: a sliding
 window such as `ROWS BETWEEN 11 PRECEDING AND CURRENT ROW` (rolling 12
@@ -550,7 +551,7 @@ While this adds a level of nesting compared to working with raw `jsonb` values, 
 | `jsonb_stats_to_delta(x jsonb)` | Entry event: a `stats_agg` (or `stats`, or `stats_delta`) as a `stats_delta` |
 | `jsonb_stats_negate(x jsonb)` | Exit event: the negation (in and out swapped) |
 | `jsonb_stats_delta_merge(a jsonb, b jsonb)` | Sum of two deltas |
-| `jsonb_stats_delta_to_agg(stock jsonb, period jsonb DEFAULT NULL)` | A stock as a `stats_agg` with `"min_max": false`, plus `in`/`out`, `change_pct`, `churn_pct` for the period. Fails if the stock or the stock before the period is negative or inconsistent |
+| `jsonb_stats_delta_to_agg(stock jsonb, period jsonb DEFAULT NULL)` | A stock as a `stats_agg` with `"min_max": false`, plus `in`/`out` and `change_pct` for the period. Fails if the stock or the stock before the period is negative or inconsistent |
 | `jsonb_stats_accum(state jsonb, stats jsonb)` | Low-level: accumulate one `stats` into running state (numeric entries carry only `count`, `sum`, `sum_sq`, `min`, `max`) |
 | `jsonb_stats_final(state jsonb)` | Low-level: compute derived stats (mean, sum_sq_diff, variance, stddev, cv_pct) on accumulated state |
 

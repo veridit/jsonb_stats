@@ -293,15 +293,6 @@ impl Decimal {
         matches!(self.mantissa, Mant::Small(0))
     }
 
-    /// The absolute value.
-    pub fn abs(self) -> Decimal {
-        if self.is_negative() {
-            self.negated()
-        } else {
-            self
-        }
-    }
-
     /// `self += sign * other` (sign is +1 or -1).
     pub fn add_signed(&mut self, other: &Decimal, negative: bool) {
         if negative {

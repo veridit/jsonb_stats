@@ -13,7 +13,7 @@ time".
   window frames subtract instead of recomputing).
 - `jsonb_stats_delta_to_agg(stock, period)`: the stock as a `stats_agg`
   marked `"min_max": false`, with the period's `in`/`out` flows and the
-  unit-free rates `change_pct` and `churn_pct` next to the coefficient of
+  unit-free rate `change_pct` next to the coefficient of
   variation.
 - Existing functions and stored aggregates are unchanged.
 
