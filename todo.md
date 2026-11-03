@@ -41,11 +41,10 @@ dynamic variables easy to reach and gives exact unit-free measures.
 
 Unpacks variables into rows so PostgreSQL's own tools (percentile_cont,
 GROUP BY key, joins between periods) work on any variable.
-- `stats` (one unit): one row per stat. int/nat/dec2/float: value = the
-  validated value (same validation and scale as accumulation), count = 1,
-  text_value NULL. str/bool/date: text_value = the value, count = 1, value
-  NULL. arr: one row per element (text_value = element, count = 1); an empty
-  array gives no rows.
+- `stats` (one unit): defined as `jsonb_stats_values(jsonb_stats_to_agg(x))`,
+  so validation and scales are exactly those of accumulation: numeric value =
+  the value, count 1; categories one row each (arr: per distinct element with
+  its count, so `{x,x}` gives x with count 2; empty array no rows).
 - `stats_agg` (incl. `"min_max": false` from delta_to_agg): numeric keys one
   row: value = sum, count = count, stat_type = base type (int, not int_agg).
   str/bool/date/arr: one row per category: text_value = category, count =
