@@ -108,14 +108,15 @@ maintainer which measure, building on the CV rather than introducing another.
 Scope: delta core + flow split. No histogram, no higher moments, no z-score,
 no compare function. min/max dropped from deltas (`"min_max": false`).
 
-Flows: the aggregate keeps three exact states per variable: net (stock),
-`inflow` (+ events) and `outflow` (- events, stored positive). A unit changing
+Flows: each entry keeps two exact states, `in` (entries) and `out` (exits,
+stored positive); the stock is `in - out` (superseded "three states": see
+Design decisions). A unit changing
 value inside a combination is `-old, +new`. Births/entries are +, deaths/exits -.
 Invariant: `stock_prev = stock - inflow + outflow`, so one output row carries
 everything needed for scale-free change detection, no previous row required:
 
-- `change_pct = (sum - sum_prev) / sum_prev * 100` (net, like exists_change)
-- `churn_pct = (inflow_sum + outflow_sum) / sum_prev * 100` (gross turnover,
+- `change_pct = (sum - sum_prev) / |sum_prev| * 100` (net, like exists_change)
+- `churn_pct = (|in.sum| + |out.sum|) / |sum_prev| * 100` (gross turnover,
   like exists_added_count + exists_removed_count)
 - `coefficient_of_variation_pct` as today (spread across units at that date)
 - null when sum_prev = 0 (no division blowups).
@@ -128,14 +129,17 @@ churn_pct 11.2 (very turbulent: worth zooming in).
 Whether a window's flows are "in this period" or "in the frame" follows the
 frame: a plain running window accumulates flows since start, so statbus uses
 the per-period delta row (GROUP BY month) for flows and the window for stock.
-Final function therefore exposes both; spec defines it precisely.
+Final function: jsonb_stats_delta_summary(stock, period) takes both (the
+window sum as stock, the month's delta as period).
 
 Steps (commit after each, performance: same i128 fast path as merge_agg,
-no extra allocation per row, bench vs jsonb_stats_merge_agg must not regress):
+bench vs jsonb_stats_merge_agg; outcome: 1.3x merge_agg, since it carries two
+flows, not "no regression"):
 1. Spec in dev/reference_plpgsql.sql.
-2. Oracle in dev/exact_oracle.py (negative counts, flows).
-3. Rust in src/state.rs: signed state, inflow/outflow, combine/serial/deserial,
-   msfunc/minvfunc, final with validation.
+2. Oracle: dev/delta_oracle.py (separate file, reuses exact_oracle helpers).
+3. Rust: src/delta.rs (separate module, reuses NumFields/AggEntry from
+   src/state.rs), in/out flows, combine/serial/deserial, msfunc/minvfunc,
+   final with validation.
 4. Tests (round trip, running sum == alive-units merge per date, order/parallel
    independence, moving == plain window, invalid stock fails, flow identity).
 5. Bench, upgrade script, CHANGELOG, README. No tag/release before review.
