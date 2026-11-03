@@ -96,8 +96,21 @@ Real data (read-only copy of statbus_local, 201,925 units; only variable
 there is employees): values unpacks all units in 1.7 s; robust peer outliers
 (median/IQR per unit type x 2-digit activity, peers >= 20) in 0.3 s, 10,472
 flagged; compare of 42 activity cells against all units of their type in
-3 ms. Not tested on real data: change between two periods (local data has one
-period).
+3 ms. statbus_local has one period only, so change was checked on the Norway
+history below.
+
+Two periods, real data (read-only copy of hibiscus's 10-year Norway test db,
+6,696 units, 444 with statistics; employees only; snapshots 2015-2024):
+- values: 3,422 unit-years unpacked in 32 ms; unit year-over-year ratios
+  against the activity's median ratio: 3,047 pairs in 1.6 s, 0 flagged at
+  3x (this data is partly synthetic yearly copies, so few real changes).
+- compare: 364 activity-year cells, each year against the previous, in
+  22 ms. Ranked by change_pct the top is a 1 -> 3 unit cell (+1116%, z
+  NULL); ranked by |z| the top is legal units in F. (11 -> 17 units, +125%,
+  z 1.65). That is what z is for: a size-aware ranking.
+- Cross-check: z for establishments in S. 2016 -> 2017 is 0.89 from
+  jsonb_stats_compare and 0.89 from plain SQL avg/var_samp over the unit
+  values.
 
 Found and fixed on the way: a stats_agg read from deltas (`"min_max": false`)
 has no min/max, which the existing parser rejects. values/compare now accept
