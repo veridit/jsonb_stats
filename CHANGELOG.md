@@ -15,6 +15,11 @@ time".
   marked `"min_max": false`, with the period's `in`/`out` flows and the
   unit-free rate `change_pct` next to the coefficient of
   variation.
+- `jsonb_stats_values(x)`: the variables of a `stats` or `stats_agg` as typed
+  rows, so medians, quartiles and joins between periods work on any variable.
+- `jsonb_stats_compare(a, b)`: per numeric variable, `change_pct`,
+  `mean_change_pct` and a Welch `z` of the difference in means, exact and
+  independent of scale, for finding aggregates that stand out.
 - Existing functions and stored aggregates are unchanged.
 
 ## 3.0.0

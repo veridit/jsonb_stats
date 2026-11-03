@@ -120,6 +120,31 @@ output `"min_max": false`, and that output is refused as an input.
 minvfunc, combine, serial/deserial via serde, final borrows the state, as
 window aggregation keeps using it).
 
+## Finding What Stands Out
+
+`src/compare.rs`, spec in `dev/reference_plpgsql.sql` ("Finding what stands
+out"), oracle `dev/compare_oracle.py`.
+
+`jsonb_stats_values` reads a `stats` through the same accumulation as
+`jsonb_stats_to_agg`, so values are validated and scaled once, in one place.
+Row order is jsonb key order (length, then bytes), so the Rust and PL/pgSQL
+versions agree row for row.
+
+`jsonb_stats_compare` uses only count, sum and sum_sq. Both sides are brought
+to one decimal scale, and every measure is a ratio of exact integers rounded
+once. Welch's z is evaluated as
+
+```
+z² = (S_b n_a − S_a n_b)² (n_a−1)(n_b−1) / (N_a n_b² (n_b−1) + N_b n_a² (n_a−1)),   N = n·sum_sq − sum²
+```
+
+with the integer-square-root rounding used for stddev. The oracle computes z
+from the textbook definition (variance from the values themselves, not from
+sum_sq), so it also checks this rearrangement.
+
+A summary marked `"min_max": false` (read from deltas) may omit min/max; a
+plain `stats_agg` without them is still rejected.
+
 ## Parallel Aggregation
 
 Both `jsonb_stats_agg` and `jsonb_stats_merge_agg` are `parallel = safe` with three supporting functions in `src/parallel.rs`:
