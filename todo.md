@@ -189,11 +189,22 @@ Done, committed on master, NOT tagged/pushed/released (awaiting review):
 Toolchain note: Homebrew llvm 22 broke pgrx 0.16 bindgen ("no field
 rd_tableam"); Makefile now pins Apple's libclang (LIBCLANG_PATH).
 
+Real-data check (local statbus_local, 15,611 unit versions, 311 regions,
+3 unit types, copied read-only to a scratch db): stock per (unit_type,
+region) at 23 month starts from 729 delta rows equals jsonb_stats_merge_agg
+of the alive units in all 16,629 non-empty cells (16,767 dense rows; the
+other 138 have no statistics). Values equal; float sums print without
+trailing zeros in deltas (canonical form, e.g. 515001329351999.533 vs
+...9.5330), so compare numerically, not as text, against stats_agg.
+
 Open questions for you:
 1. churn_pct uses |in.sum| + |out.sum|. A unit changing 10 -> 12 counts as
    out 10 + in 10+2, so value changes inflate churn (as in the example). If
    you want births/deaths-only churn, statbus can emit changes as a separate
    delta stream; or we add a "net change only" mode. Decide on real data.
 2. Delta for date_agg drops min/max like numeric (counts only).
-3. Name check: jsonb_stats_delta_summary vs e.g. jsonb_stats_delta_final.
+3. Float printing: delta stocks print float sum/sum_sq trimmed (see above),
+   so they are not text-identical to jsonb_stats_agg. Needed for
+   path-independence; tell me if statbus compares text.
+4. Name check: jsonb_stats_delta_summary vs e.g. jsonb_stats_delta_final.
 Then: tag v3.1.0 per release checklist, and integrate in statbus (STATBUS-558).
