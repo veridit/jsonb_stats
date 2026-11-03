@@ -35,3 +35,10 @@ CREATE AGGREGATE jsonb_stats_delta_agg(jsonb) (
     mfinalfunc = jsonb_stats_delta_final_internal,
     parallel = safe
 );
+
+-- Finding what stands out: variables as rows, and comparing two summaries.
+CREATE FUNCTION "jsonb_stats_values"("x" jsonb)
+RETURNS TABLE ("key" TEXT, "stat_type" TEXT, "value" NUMERIC, "text_value" TEXT, "count" bigint)
+IMMUTABLE STRICT PARALLEL SAFE LANGUAGE c AS 'MODULE_PATHNAME', 'jsonb_stats_values_wrapper';
+CREATE FUNCTION "jsonb_stats_compare"("a" jsonb, "b" jsonb) RETURNS jsonb
+IMMUTABLE STRICT PARALLEL SAFE LANGUAGE c AS 'MODULE_PATHNAME', 'jsonb_stats_compare_wrapper';
