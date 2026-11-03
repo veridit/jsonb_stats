@@ -175,6 +175,8 @@ Done, committed on master, NOT tagged/pushed/released (awaiting review):
   (README "Stock over time", ARCHITECTURE, CHANGELOG 3.1.0), version 3.1.0,
   upgrade script sql/jsonb_stats--3.0.0--3.1.0.sql.
 - Verified: make test 110/110; make clippy (-D warnings) clean; fixture-check;
+  make xarch IDENTICAL (amd64 == arm64, incl. delta checks); make upgrade-test
+  OLD_REF=v3.0.0 passes;
   local upgrade 3.0.0 -> 3.1.0 gives a catalog identical to a fresh install.
 - Tests prove: running window == oracle for 24 months x (int, dec2, float,
   nat, str) incl. in/out/change_pct/churn_pct; stock == jsonb_stats_agg of
