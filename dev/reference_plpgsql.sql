@@ -963,14 +963,7 @@ BEGIN
         END IF;
         t := s->>'type';
         IF t IN ('int_agg', 'nat_agg', 'dec2_agg', 'float_agg') THEN
-            IF (s->'count')::numeric = 0 THEN
-                -- an empty stock from delta_to_agg
-                key := k; stat_type := split_part(t, '_', 1);
-                value := (s->'sum')::numeric; text_value := NULL; count := 0;
-                RETURN NEXT;
-                CONTINUE;
-            END IF;
-            st := jsonb_stats_num_state_plpgsql(k, s);
+            st := jsonb_stats_num_state_or_empty_plpgsql(k, s);
             key := k; stat_type := split_part(t, '_', 1);
             value := st.sum_val; text_value := NULL; count := st.count_val;
             RETURN NEXT;
@@ -988,32 +981,38 @@ BEGIN
                 RETURN NEXT;
             END LOOP;
         ELSE
-            RAISE EXCEPTION 'jsonb_stats: unknown aggregate type ''%''. Expected: int_agg, float_agg, dec2_agg, nat_agg, str_agg, bool_agg, arr_agg, date_agg', t;
+            RAISE EXCEPTION 'jsonb_stats: unknown aggregate type ''%''. Expected: int_agg, float_agg, dec2_agg, nat_agg, str_agg, bool_agg, arr_agg, date_agg', coalesce(t, '');
         END IF;
     END LOOP;
 END;
 $jsonb_stats_values_plpgsql$;
 
 -- Numeric state of a summary that may be an empty stock (count 0, from
--- jsonb_stats_delta_to_agg). Returns count, sum, sum_sq.
-CREATE OR REPLACE FUNCTION jsonb_stats_compare_state_plpgsql(
+-- jsonb_stats_delta_to_agg): then sum and sum_sq must be 0, and sum keeps
+-- its printed scale. NULL summary = empty. Otherwise as num_state.
+CREATE OR REPLACE FUNCTION jsonb_stats_num_state_or_empty_plpgsql(
     key text, summary jsonb,
     OUT count_val numeric, OUT sum_val numeric, OUT sum_sq_val numeric)
 LANGUAGE plpgsql IMMUTABLE
-AS $jsonb_stats_compare_state_plpgsql$
+AS $jsonb_stats_num_state_or_empty_plpgsql$
 DECLARE
     st record;
 BEGIN
     IF summary IS NULL THEN
         count_val := 0; sum_val := 0; sum_sq_val := 0;
     ELSIF jsonb_typeof(summary->'count') = 'number' AND (summary->'count')::numeric = 0 THEN
-        count_val := 0; sum_val := 0; sum_sq_val := 0;
+        IF jsonb_typeof(summary->'sum') IS DISTINCT FROM 'number'
+           OR jsonb_typeof(summary->'sum_sq') IS DISTINCT FROM 'number'
+           OR (summary->'sum')::numeric <> 0 OR (summary->'sum_sq')::numeric <> 0 THEN
+            RAISE EXCEPTION 'jsonb_stats: % for key ''%'' has count 0 but a non-zero or missing sum/sum_sq', summary->>'type', key;
+        END IF;
+        count_val := 0; sum_val := (summary->'sum')::numeric; sum_sq_val := (summary->'sum_sq')::numeric;
     ELSE
         st := jsonb_stats_num_state_plpgsql(key, summary);
         count_val := st.count_val; sum_val := st.sum_val; sum_sq_val := st.sum_sq_val;
     END IF;
 END;
-$jsonb_stats_compare_state_plpgsql$;
+$jsonb_stats_num_state_or_empty_plpgsql$;
 
 -- Compare two stats_agg, a = reference (previous period or peers),
 -- b = subject. Per numeric key present in either (a missing side is empty):
@@ -1057,10 +1056,10 @@ BEGIN
         IF t IN ('str_agg', 'bool_agg', 'arr_agg', 'date_agg') THEN
             CONTINUE;
         ELSIF t NOT IN ('int_agg', 'nat_agg', 'dec2_agg', 'float_agg') OR t IS NULL THEN
-            RAISE EXCEPTION 'jsonb_stats: unknown aggregate type ''%''. Expected: int_agg, float_agg, dec2_agg, nat_agg, str_agg, bool_agg, arr_agg, date_agg', t;
+            RAISE EXCEPTION 'jsonb_stats: unknown aggregate type ''%''. Expected: int_agg, float_agg, dec2_agg, nat_agg, str_agg, bool_agg, arr_agg, date_agg', coalesce(t, '');
         END IF;
-        x := jsonb_stats_compare_state_plpgsql(k, sa);
-        y := jsonb_stats_compare_state_plpgsql(k, sb);
+        x := jsonb_stats_num_state_or_empty_plpgsql(k, sa);
+        y := jsonb_stats_num_state_or_empty_plpgsql(k, sb);
         na := x.count_val; nb := y.count_val; s_a := x.sum_val; s_b := y.sum_val;
         big_a := na * x.sum_sq_val - s_a * s_a;
         big_b := nb * y.sum_sq_val - s_b * s_b;
