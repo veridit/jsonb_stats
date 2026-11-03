@@ -197,6 +197,18 @@ other 138 have no statistics). Values equal; float sums print without
 trailing zeros in deltas (canonical form, e.g. 515001329351999.533 vs
 ...9.5330), so compare numerically, not as text, against stats_agg.
 
+Acceptance check against STATBUS itself: rebuilt the facet history from
+statistical_unit with STATBUS's own existence rule (used_for_counting,
+unit_existence_from/until, the 8 facet dimensions) as 12,290 delta rows
+(vs 298,264 stored year-month facet rows). For every stored row of
+public.statistical_history_facet, jsonb_stats_delta_summary of the running
+sum to the month end equals the stored stats_summary (all keys, minus
+min/max, numeric value equality): 298,264 / 298,264. Read-only; data copied
+to a scratch db. Limitation: the local data has all events in 2025-01, so
+change_pct/churn_pct are covered only by the oracle tests, not real data.
+The 7 min for the comparison is the correlated per-row query, not the
+aggregate (12,290 rows summed in 0.3 s).
+
 Open questions for you:
 1. churn_pct uses |in.sum| + |out.sum|. A unit changing 10 -> 12 counts as
    out 10 + in 10+2, so value changes inflate churn (as in the example). If
