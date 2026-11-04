@@ -73,7 +73,7 @@ fn test_delta_round_trip_and_order() {
         "SELECT count(*)::text FROM delta_units
          WHERE jsonb_stats_delta_to_agg(jsonb_stats_delta_merge(
                    jsonb_stats_to_delta(stats), jsonb_stats_negate(stats)))::text
-               <> '{\"type\": \"stats_agg\", \"min_max\": false}'",
+               <> '{\"type\": \"stats_agg\"}'",
     );
     assert_eq!(not_empty, "0");
     // negate(negate(x)) = to_delta(x); to_delta is idempotent.
@@ -236,7 +236,7 @@ fn test_delta_shapes_and_rates() {
     assert_eq!(sql_text("SELECT jsonb_stats_delta_agg(NULL::jsonb)::text"), r#"{"type": "stats_delta"}"#);
     assert_eq!(
         sql_text(r#"SELECT jsonb_stats_delta_to_agg('{"type": "stats_delta"}')::text"#),
-        r#"{"type": "stats_agg", "min_max": false}"#
+        r#"{"type": "stats_agg"}"#
     );
 }
 
@@ -276,12 +276,12 @@ fn test_delta_invalid_input_fails_fast() {
             "jsonb_stats: unknown summary type 'foo_delta' for key 'e'. Expected a *_agg or *_delta of: int, float, dec2, nat, str, bool, arr, date",
         ),
         (
-            r#"SELECT jsonb_stats_to_delta('{"type": "stats_agg", "min_max": false}')"#,
-            "jsonb_stats: a stats_agg without min/max (from jsonb_stats_delta_to_agg) is a result, not an input",
+            r#"SELECT jsonb_stats_to_delta('{"type": "stats_agg", "e": {"type": "int_agg", "count": 1, "sum": 1, "sum_sq": 1, "min": 1}}')"#,
+            "jsonb_stats: int_agg for key 'e' has missing or non-numeric 'max'",
         ),
         (
-            r#"SELECT jsonb_stats_to_delta('{"type": "stats", "min_max": {"type": "int", "value": 1}}')"#,
-            "jsonb_stats: key 'min_max' is reserved in stats_delta",
+            r#"SELECT jsonb_stats_to_delta('{"type": "stats_agg", "e": {"type": "int_agg", "count": 0, "sum": 0, "sum_sq": 0, "min": 1, "max": 1}}')"#,
+            "jsonb_stats: int_agg for key 'e' has invalid 'count' (must be an integer >= 1)",
         ),
         (
             r#"SELECT jsonb_stats_to_delta('{"type": "nope"}')"#,
@@ -300,5 +300,132 @@ fn test_delta_invalid_input_fails_fast() {
             .replace("jsonb_stats_negate(", "jsonb_stats_negate_plpgsql(")
             .replace("jsonb_stats_delta_merge(", "jsonb_stats_delta_merge_plpgsql(");
         assert_eq!(sql_error(&refq), msg, "reference: {refq}");
+    }
+}
+
+// ── stats_agg without min/max (stocks read from deltas) in merge and to_delta ──
+
+/// Per (group, month): the stock of group's units, read from deltas.
+const GROUP_STOCKS: &str = "
+    SELECT g.grp, m.month, jsonb_stats_delta_to_agg(jsonb_stats_delta_agg(e.d)) AS s
+    FROM generate_series(1, 24) AS m(month), (VALUES (0), (1), (2)) AS g(grp)
+    JOIN delta_events AS e ON e.unit % 3 = g.grp
+    WHERE e.month <= m.month
+    GROUP BY 1, 2";
+
+#[pg_test]
+fn test_delta_stocks_merge_like_summed_deltas() {
+    load_delta_fixture();
+    // Stocks of three unit groups, merged with jsonb_stats_merge_agg, equal
+    // the stock of all units (the oracle's expected summary without the
+    // period fields), every month.
+    let merged = format!(
+        "SELECT month, jsonb_stats_merge_agg(s) FROM ({GROUP_STOCKS}) t GROUP BY month"
+    );
+    let bad = sql_text(&format!(
+        "SELECT coalesce(string_agg(e.month::text, ','), '') FROM delta_expected e JOIN ({merged}) g(month, s) USING (month)
+         WHERE g.s::text IS DISTINCT FROM (
+             SELECT jsonb_object_agg(k, CASE WHEN jsonb_typeof(v) = 'object' THEN v - '{{in,out,change_pct}}'::text[] ELSE v END)
+             FROM jsonb_each(e.summary) AS x(k, v))::text"
+    ));
+    assert_eq!(bad, "", "merge_agg of group stocks vs oracle");
+    // Same with the scalar merge, pairwise in both orders.
+    let pairwise = sql_text(&format!(
+        "WITH s AS ({GROUP_STOCKS})
+         SELECT count(*)::text FROM s a JOIN s b ON a.month = b.month AND a.grp = 0 AND b.grp = 1
+         WHERE jsonb_stats_merge(a.s, b.s)::text IS DISTINCT FROM jsonb_stats_merge(b.s, a.s)::text
+            OR jsonb_stats_merge(a.s, b.s)::text IS DISTINCT FROM (SELECT jsonb_stats_delta_to_agg(jsonb_stats_delta_agg(d))
+                 FROM delta_events WHERE unit % 3 IN (0, 1) AND month <= a.month)::text"
+    ));
+    assert_eq!(pairwise, "0", "scalar merge of two stocks vs stock of both");
+}
+
+#[pg_test]
+fn test_delta_stocks_merge_parallel_and_reference() {
+    load_plpgsql_reference();
+    load_delta_fixture();
+    Spi::run(&format!(
+        "CREATE TEMP TABLE gs AS SELECT t.*, r FROM ({GROUP_STOCKS}) t, generate_series(1, 40) r; ANALYZE gs"
+    ))
+    .unwrap();
+    Spi::run("SET max_parallel_workers_per_gather = 0").unwrap();
+    let serial = sql_text("SELECT jsonb_stats_merge_agg(s)::text FROM gs");
+    Spi::run(
+        "SET parallel_setup_cost = 0; SET parallel_tuple_cost = 0;
+         SET min_parallel_table_scan_size = 0; SET max_parallel_workers_per_gather = 4;
+         SET debug_parallel_query = regress",
+    )
+    .unwrap();
+    assert_eq!(sql_text("SELECT jsonb_stats_merge_agg(s)::text FROM gs"), serial, "parallel");
+    Spi::run("RESET debug_parallel_query; SET max_parallel_workers_per_gather = 0").unwrap();
+    assert_eq!(
+        sql_text("SELECT jsonb_stats_merge_agg_plpgsql(s ORDER BY grp DESC, month)::text FROM gs WHERE r = 1"),
+        sql_text("SELECT jsonb_stats_merge_agg(s ORDER BY grp, month)::text FROM gs WHERE r = 1"),
+        "reference merge_agg"
+    );
+    let diffs = sql_text(&format!(
+        "WITH s AS ({GROUP_STOCKS})
+         SELECT count(*)::text FROM s a JOIN s b ON a.month = b.month AND a.grp = 0 AND b.grp = 2
+         WHERE jsonb_stats_merge(a.s, b.s)::text IS DISTINCT FROM jsonb_stats_merge_plpgsql(a.s, b.s)::text
+            OR jsonb_stats_to_delta(a.s)::text IS DISTINCT FROM jsonb_stats_to_delta_plpgsql(a.s)::text
+            OR jsonb_stats_final(a.s)::text IS DISTINCT FROM jsonb_stats_final_plpgsql(a.s)::text"
+    ));
+    assert_eq!(diffs, "0", "Rust == reference for merge, to_delta, final on stocks");
+}
+
+#[pg_test]
+fn test_delta_stock_as_input() {
+    load_plpgsql_reference();
+    // hibiscus's failing query (STATBUS-558), with stats() in place of the
+    // aggregate jsonb_stats_agg(code, stat), which VALUES does not allow.
+    let s = "jsonb_stats_delta_to_agg(jsonb_stats_to_delta(jsonb_stats_to_agg(stats('employees', 5))))";
+    assert_eq!(
+        sql_text(&format!("SELECT jsonb_stats_merge_agg(s)::text FROM (VALUES ({s}), ({s})) t(s)")),
+        r#"{"type": "stats_agg", "employees": {"sum": 10, "mean": 5.00, "type": "int_agg", "count": 2, "stddev": 0.00, "sum_sq": 50, "variance": 0.00, "sum_sq_diff": 0.00, "coefficient_of_variation_pct": 0.00}}"#
+    );
+    // A stock merged with a full stats_agg: no min/max (unknown for the union).
+    assert_eq!(
+        sql_text(&format!("SELECT (jsonb_stats_merge({s}, jsonb_stats_to_agg(stats('employees', 7)))->'employees' ? 'min')::text")),
+        "false"
+    );
+    // Full + full keeps min/max as before.
+    assert_eq!(
+        sql_text("SELECT jsonb_stats_merge(jsonb_stats_to_agg(stats('e', 5)), jsonb_stats_to_agg(stats('e', 7)))->'e'->>'max'"),
+        "7"
+    );
+    // to_delta / delta_agg take a stock as an entry: round trip.
+    assert_eq!(
+        sql_text(&format!("SELECT jsonb_stats_delta_to_agg(jsonb_stats_delta_agg(d))::text FROM (VALUES (jsonb_stats_to_delta({s}))) t(d)")),
+        sql_text(&format!("SELECT ({s})::text"))
+    );
+    // Date: counts merge, min/max only when both sides have them.
+    let full = "jsonb_stats_to_agg(stats('d', '2025-01-01'::date))";
+    let stock = "jsonb_stats_delta_to_agg(jsonb_stats_to_delta(stats('d', '2024-01-01'::date)))";
+    assert_eq!(
+        sql_text(&format!("SELECT jsonb_stats_merge({full}, {stock})::text")),
+        r#"{"d": {"type": "date_agg", "counts": {"2024-01-01": 1, "2025-01-01": 1}}, "type": "stats_agg"}"#
+    );
+    assert_eq!(
+        sql_text(&format!("SELECT jsonb_stats_merge({full}, {stock})::text")),
+        sql_text(&format!("SELECT jsonb_stats_merge_plpgsql({full}, {stock})::text"))
+    );
+    // An empty stock (count 0) merges as nothing; mean is NULL on its own.
+    let empty = "jsonb_stats_delta_to_agg(jsonb_stats_delta_merge(jsonb_stats_to_delta(stats('e', 3)), jsonb_stats_negate(stats('e', 3))), jsonb_stats_negate(stats('e', 3)))";
+    assert_eq!(
+        sql_text(&format!("SELECT jsonb_stats_merge({empty} #- '{{e,in}}' #- '{{e,out}}' #- '{{e,change_pct}}', jsonb_stats_to_agg(stats('e', 4)))->'e'->>'count'")),
+        "1"
+    );
+    assert_eq!(
+        sql_text(&format!("SELECT (jsonb_stats_final({empty} #- '{{e,in}}' #- '{{e,out}}' #- '{{e,change_pct}}')->'e'->>'mean' IS NULL)::text")),
+        "true"
+    );
+    // Only one of min/max: fails, Rust and reference alike.
+    for f in ["jsonb_stats_merge", "jsonb_stats_merge_plpgsql"] {
+        assert_eq!(
+            sql_error(&format!(
+                r#"SELECT {f}('{{"type": "stats_agg", "e": {{"type": "int_agg", "count": 1, "sum": 1, "sum_sq": 1, "min": 1}}}}', '{{}}')"#
+            )),
+            "jsonb_stats: int_agg for key 'e' has missing or non-numeric 'max'"
+        );
     }
 }

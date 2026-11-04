@@ -89,13 +89,16 @@ impl NumKind {
 
 /// Exact state of a numeric aggregate. Combining two states only adds, so the
 /// result is independent of order and grouping.
+///
+/// `min_max` is `None` for a summary read from deltas (min and max cannot be
+/// undone when a unit leaves). A merge keeps min/max only when both sides
+/// have them; such a summary may have count 0 (an empty stock).
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct NumFields {
     pub count: i64,
     pub sum: Decimal,
     pub sum_sq: Decimal,
-    pub min: Decimal,
-    pub max: Decimal,
+    pub min_max: Option<(Decimal, Decimal)>,
 }
 
 impl NumFields {
@@ -104,8 +107,7 @@ impl NumFields {
             count: 1,
             sum_sq: v.square(),
             sum: v.clone(),
-            min: v.clone(),
-            max: v,
+            min_max: Some((v.clone(), v)),
         }
     }
 
@@ -117,11 +119,13 @@ impl NumFields {
             .unwrap_or_else(|| pgrx::error!("jsonb_stats: count overflow"));
         self.sum.add_assign(&v);
         self.sum_sq.add_assign(&v.square());
-        if self.min.replaced_by(&v, true) {
-            self.min = v.clone();
-        }
-        if self.max.replaced_by(&v, false) {
-            self.max = v;
+        if let Some((min, max)) = &mut self.min_max {
+            if min.replaced_by(&v, true) {
+                *min = v.clone();
+            }
+            if max.replaced_by(&v, false) {
+                *max = v;
+            }
         }
     }
 
@@ -133,12 +137,19 @@ impl NumFields {
             .unwrap_or_else(|| pgrx::error!("jsonb_stats: count overflow"));
         self.sum.add_assign(&other.sum);
         self.sum_sq.add_assign(&other.sum_sq);
-        if self.min.replaced_by(&other.min, true) {
-            self.min = other.min;
-        }
-        if self.max.replaced_by(&other.max, false) {
-            self.max = other.max;
-        }
+        self.min_max = match (self.min_max.take(), other.min_max) {
+            (Some((mut min, mut max)), Some((omin, omax))) => {
+                if min.replaced_by(&omin, true) {
+                    min = omin;
+                }
+                if max.replaced_by(&omax, false) {
+                    max = omax;
+                }
+                Some((min, max))
+            }
+            // min/max of the union are unknown
+            _ => None,
+        };
     }
 
     /// Parse the exact state of a numeric *_agg JSON summary. Derived fields
@@ -157,20 +168,34 @@ impl NumFields {
     /// so it is recovered exactly whenever the stored error is below 0.5. The
     /// lower bound keeps the state consistent. Recomputing from source data
     /// makes it exact.
+    ///
+    /// min/max are optional (a summary read from deltas has none): both or
+    /// neither. Without them count may be 0, with sum = sum_sq = 0.
     pub fn from_summary(kind: NumKind, key: &str, obj: &Map<String, Value>) -> Self {
         let agg = kind.agg_type();
+        let legacy = !obj.contains_key("sum_sq");
+        if legacy && !obj.contains_key("sum_sq_diff") {
+            pgrx::error!(
+                "jsonb_stats: {} for key '{}' has neither 'sum_sq' nor 'sum_sq_diff'",
+                agg,
+                key
+            );
+        }
+        let has_min_max = legacy || obj.contains_key("min") || obj.contains_key("max");
+        let min_count: i64 = if has_min_max { 1 } else { 0 };
         let count = match obj.get("count") {
             Some(Value::Number(n)) => Decimal::from_str(n.as_str())
                 .ok()
                 .and_then(|c| c.to_i64())
-                .filter(|c| *c >= 1),
+                .filter(|c| *c >= min_count),
             _ => None,
         }
         .unwrap_or_else(|| {
             pgrx::error!(
-                "jsonb_stats: {} for key '{}' has invalid 'count' (must be an integer >= 1)",
+                "jsonb_stats: {} for key '{}' has invalid 'count' (must be an integer >= {})",
                 agg,
-                key
+                key,
+                min_count
             )
         });
         let field = |name: &str| -> Decimal {
@@ -185,31 +210,24 @@ impl NumFields {
                 ),
             }
         };
-        let f = if obj.contains_key("sum_sq") {
+        // Same field order as the reference: sum, sum_sq (or sum_sq_diff), min, max.
+        let f = if !legacy {
+            let sum = field("sum");
+            let sum_sq = field("sum_sq");
+            let min_max = has_min_max.then(|| (field("min"), field("max")));
             NumFields {
                 count,
-                sum: field("sum"),
-                sum_sq: field("sum_sq"),
-                min: field("min"),
-                max: field("max"),
+                sum,
+                sum_sq,
+                min_max,
             }
-        } else if obj.contains_key("sum_sq_diff") {
-            Self::from_legacy(
-                kind,
-                count,
-                field("sum"),
-                &field("sum_sq_diff"),
-                field("min"),
-                field("max"),
-            )
         } else {
-            pgrx::error!(
-                "jsonb_stats: {} for key '{}' has neither 'sum_sq' nor 'sum_sq_diff'",
-                agg,
-                key
-            )
+            let sum = field("sum");
+            let ssd = field("sum_sq_diff");
+            let (min, max) = (field("min"), field("max"));
+            Self::from_legacy(kind, count, sum, &ssd, min, max)
         };
-        if f.n_big().is_negative() {
+        if f.n_big().is_negative() || (f.count == 0 && !f.sum_sq.is_zero()) {
             pgrx::error!(
                 "jsonb_stats: {} for key '{}' is inconsistent (count * sum_sq < sum^2)",
                 agg,
@@ -255,8 +273,7 @@ impl NumFields {
             count,
             sum,
             sum_sq,
-            min,
-            max,
+            min_max: Some((min, max)),
         }
     }
 
@@ -281,8 +298,10 @@ impl NumFields {
         m.insert("count".into(), json!(self.count));
         m.insert("sum".into(), self.sum.to_json());
         m.insert("sum_sq".into(), self.sum_sq.to_json());
-        m.insert("min".into(), self.min.to_json());
-        m.insert("max".into(), self.max.to_json());
+        if let Some((min, max)) = &self.min_max {
+            m.insert("min".into(), min.to_json());
+            m.insert("max".into(), max.to_json());
+        }
         Value::Object(m)
     }
 
@@ -298,15 +317,18 @@ impl NumFields {
         let ten_s = num_traits::pow(BigInt::from(10u8), s as usize);
         let ten_2s = &ten_s * &ten_s;
 
-        // mean = s1 / (count * 10^s); sum_sq_diff = N / (count * 10^2s)
-        m.insert(
-            "mean".into(),
-            ratio_round2(&s1, &(&count * &ten_s)).to_json(),
-        );
-        m.insert(
-            "sum_sq_diff".into(),
-            ratio_round2(&n_big, &(&count * &ten_2s)).to_json(),
-        );
+        // mean = s1 / (count * 10^s); sum_sq_diff = N / (count * 10^2s);
+        // NULL for an empty stock (count 0).
+        let (mean, ssd) = if self.count == 0 {
+            (Value::Null, Value::Null)
+        } else {
+            (
+                ratio_round2(&s1, &(&count * &ten_s)).to_json(),
+                ratio_round2(&n_big, &(&count * &ten_2s)).to_json(),
+            )
+        };
+        m.insert("mean".into(), mean);
+        m.insert("sum_sq_diff".into(), ssd);
 
         if self.count > 1 {
             let var_den = &count * (&count - 1u8) * &ten_2s;
@@ -550,15 +572,15 @@ impl AggEntry {
                 },
             ) => {
                 add_counts(ca, cb);
-                if let Some(b) = min_b {
-                    if min_a.as_ref().is_none_or(|a| b < *a) {
-                        *min_a = Some(b);
-                    }
+                // min/max only when both sides have them (a date stock read
+                // from deltas has none).
+                match (min_a.take(), min_b) {
+                    (Some(a), Some(b)) => *min_a = Some(if b < a { b } else { a }),
+                    _ => *min_a = None,
                 }
-                if let Some(b) = max_b {
-                    if max_a.as_ref().is_none_or(|a| b > *a) {
-                        *max_a = Some(b);
-                    }
+                match (max_a.take(), max_b) {
+                    (Some(a), Some(b)) => *max_a = Some(if b > a { b } else { a }),
+                    _ => *max_a = None,
                 }
             }
             _ => unreachable!("type_tag check guarantees matching variants"),

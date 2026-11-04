@@ -439,9 +439,11 @@ in the period, as for a unit that really entered and left. To correct data,
 delete the wrong events and insert new ones (keep events per unit), rather
 than adding negations to stored totals.
 
-`jsonb_stats_delta_to_agg(stock, period)` reads a stock as a `stats_agg`
-marked `"min_max": false` (min and max cannot be undone when a unit leaves; for
-exact min/max at a date, aggregate the units alive at that date). Numeric
+`jsonb_stats_delta_to_agg(stock, period)` reads a stock as an ordinary
+`stats_agg` without `min` and `max` (they cannot be undone when a unit leaves;
+for exact min/max at a date, aggregate the units alive at that date). It can
+be merged, stored and turned into a delta again like any `stats_agg`: a merge
+keeps min/max only when every input has them. Numeric
 variables get `count`, `sum`, `sum_sq`, `mean`, `sum_sq_diff`, `variance`,
 `stddev` and `coefficient_of_variation_pct` exactly as `jsonb_stats_agg` would
 give for the units alive. With a `period` (the changes inside the last
@@ -612,7 +614,7 @@ While this adds a level of nesting compared to working with raw `jsonb` values, 
 | `jsonb_stats_to_delta(x jsonb)` | Entry event: a `stats_agg` (or `stats`, or `stats_delta`) as a `stats_delta` |
 | `jsonb_stats_negate(x jsonb)` | Exit event: in and out swapped. Not an undo: an entry plus its negation leaves both flows |
 | `jsonb_stats_delta_merge(a jsonb, b jsonb)` | Sum of two deltas |
-| `jsonb_stats_delta_to_agg(stock jsonb, period jsonb DEFAULT NULL)` | A stock as a `stats_agg` with `"min_max": false`, plus `in`/`out` and `change_pct` for the period. Fails if the stock or the stock before the period is negative or inconsistent |
+| `jsonb_stats_delta_to_agg(stock jsonb, period jsonb DEFAULT NULL)` | A stock as a `stats_agg` without min/max, plus `in`/`out` and `change_pct` for the period. Fails if the stock or the stock before the period is negative or inconsistent |
 | `jsonb_stats_values(x jsonb)` | Variables of a `stats` or `stats_agg` as rows `(key, stat_type, value, text_value, count)` (see "Finding what stands out") |
 | `jsonb_stats_compare(a jsonb, b jsonb)` | Per numeric variable: `change_pct`, `mean_change_pct` and `z` of `b` against the reference `a` |
 | `jsonb_stats_accum(state jsonb, stats jsonb)` | Low-level: accumulate one `stats` into running state (numeric entries carry only `count`, `sum`, `sum_sq`, `min`, `max`) |
@@ -634,7 +636,7 @@ The extension follows a **fail-fast** strategy. Invalid input raises a PostgreSQ
 - **`stat()` of NaN or ±Infinity** → `ERROR: stat() cannot represent non-finite value`
 - **Invalid `stats_delta` flow** (negative count, `count * sum_sq < sum²`, wrong scale for the kind) → `ERROR: <kind>_delta for key '...' has an invalid 'in'|'out' flow: ...`
 - **Reading an invalid stock** (more left than entered) → `ERROR: ... has an invalid 'stock' flow` (or `'previous stock'`)
-- **`jsonb_stats_delta_to_agg` output used as input** (`"min_max": false`) → `ERROR`; the key `min_max` is reserved
+- **Numeric summary with only one of `min`/`max`** → `ERROR` (both or neither; a summary without them may have `count` 0)
 
 ## Upgrading
 

@@ -12,7 +12,7 @@ caller in its own columns, not here.
 API: `jsonb_stats_to_delta` (entry), `jsonb_stats_negate` (exit, not an undo),
 `jsonb_stats_delta_merge`, `jsonb_stats_delta_agg` (parallel, moving window),
 `jsonb_stats_delta_to_agg(stock, period)` -> `stats_agg` with
-`"min_max": false`; with a period also `in`/`out` {count, sum} and
+no min/max; with a period also `in`/`out` {count, sum} and
 `change_pct`, next to `coefficient_of_variation_pct`.
 
 Verified: make test, clippy, fixture-check, xarch, upgrade-test from v3.0.0;
@@ -45,7 +45,7 @@ GROUP BY key, joins between periods) work on any variable.
   so validation and scales are exactly those of accumulation: numeric value =
   the value, count 1; categories one row each (arr: per distinct element with
   its count, so `{x,x}` gives x with count 2; empty array no rows).
-- `stats_agg` (incl. `"min_max": false` from delta_to_agg): numeric keys one
+- `stats_agg` (incl. stocks from delta_to_agg, without min/max): numeric keys one
   row: value = sum, count = count, stat_type = base type (int, not int_agg).
   str/bool/date/arr: one row per category: text_value = category, count =
   its count, value NULL.
@@ -58,7 +58,7 @@ GROUP BY key, joins between periods) work on any variable.
 ### jsonb_stats_compare(a jsonb, b jsonb) RETURNS jsonb
 
 a = the reference (previous period, or the peers), b = the subject (this
-period, or the cell). Both `stats_agg` (any producer, incl. min_max:false).
+period, or the cell). Both `stats_agg` (any producer, incl. stocks from deltas).
 Output `{"type": "stats_compare", <key>: {...}}` for every numeric key present
 in a or b (a missing side counts as empty: count 0). Counted keys are skipped.
 Per key:
@@ -112,10 +112,11 @@ Two periods, real data (read-only copy of hibiscus's 10-year Norway test db,
   jsonb_stats_compare and 0.89 from plain SQL avg/var_samp over the unit
   values.
 
-Found and fixed on the way: a stats_agg read from deltas (`"min_max": false`)
-has no min/max, which the existing parser rejects. values/compare now accept
-that only when the summary is marked; a plain stats_agg without min/max still
-fails.
+Changed 2026-11-04 (owner, via hibiscus/STATBUS-558): no "min_max" marker.
+min/max are optional in every stats_agg (both or neither); merge, merge_agg,
+final, to_delta, delta_agg, values and compare accept summaries without them,
+and a merge keeps them only when every input has them. Count 0 is allowed
+without min/max.
 
 Open for the owner:
 1. Release as 3.1.0 (one release with deltas) or tag the deltas as 3.1.0 and

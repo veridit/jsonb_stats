@@ -21,78 +21,11 @@ use crate::state::{NumFields, NumKind, StatsState};
 const UNKNOWN_AGG_TYPE: &str =
     "Expected: int_agg, float_agg, dec2_agg, nat_agg, str_agg, bool_agg, arr_agg, date_agg";
 
-/// count, sum, sum_sq of a numeric summary that may be an empty stock
-/// (count 0, from jsonb_stats_delta_to_agg). An empty stock must have
-/// sum = sum_sq = 0; its sum keeps its printed scale. With `no_min_max` (the
-/// stats_agg is marked `"min_max": false`) min/max are not required.
-/// Spec: jsonb_stats_num_state_or_empty_plpgsql
-fn num_state_or_empty(
-    kind: NumKind,
-    key: &str,
-    obj: &Map<String, Value>,
-    no_min_max: bool,
-) -> (i64, Decimal, Decimal) {
-    let zero_count = matches!(obj.get("count"), Some(Value::Number(n))
-        if Decimal::from_str(n.as_str()).map(|d| d.is_zero()).unwrap_or(false));
-    if zero_count {
-        let num = |name: &str| match obj.get(name) {
-            Some(Value::Number(n)) => Decimal::from_str(n.as_str()).ok().filter(|d| d.is_zero()),
-            _ => None,
-        };
-        return match (num("sum"), num("sum_sq")) {
-            (Some(s), Some(q)) => (0, s, q),
-            _ => pgrx::error!(
-                "jsonb_stats: {} for key '{}' has count 0 but a non-zero or missing sum/sum_sq",
-                kind.agg_type(),
-                key
-            ),
-        };
-    }
-    if no_min_max {
-        let agg = kind.agg_type();
-        let count = match obj.get("count") {
-            Some(Value::Number(n)) => Decimal::from_str(n.as_str())
-                .ok()
-                .and_then(|c| c.to_i64())
-                .filter(|c| *c >= 1),
-            _ => None,
-        }
-        .unwrap_or_else(|| {
-            pgrx::error!(
-                "jsonb_stats: {} for key '{}' has invalid 'count' (must be an integer >= 1)",
-                agg,
-                key
-            )
-        });
-        let num = |name: &str| match obj.get(name) {
-            Some(Value::Number(n)) => Decimal::from_str(n.as_str()).ok(),
-            _ => None,
-        };
-        let (Some(sum), Some(sum_sq)) = (num("sum"), num("sum_sq")) else {
-            pgrx::error!(
-                "jsonb_stats: {} for key '{}' has missing or non-numeric 'sum'/'sum_sq'",
-                agg,
-                key
-            )
-        };
-        let s = sum.scale().max(sum_sq.scale().div_ceil(2));
-        let s1 = sum.mantissa_at(s);
-        if (BigInt::from(count) * sum_sq.mantissa_at(2 * s) - &s1 * &s1).is_negative() {
-            pgrx::error!(
-                "jsonb_stats: {} for key '{}' is inconsistent (count * sum_sq < sum^2)",
-                agg,
-                key
-            );
-        }
-        return (count, sum, sum_sq);
-    }
+/// count, sum, sum_sq of a numeric summary (min/max optional, count may be
+/// 0 without them: see NumFields::from_summary).
+fn num_state(kind: NumKind, key: &str, obj: &Map<String, Value>) -> (i64, Decimal, Decimal) {
     let f = NumFields::from_summary(kind, key, obj);
     (f.count, f.sum, f.sum_sq)
-}
-
-/// A stats_agg read from deltas is marked `"min_max": false`.
-fn no_min_max(m: &Map<String, Value>) -> bool {
-    matches!(m.get("min_max"), Some(Value::Bool(false)))
 }
 
 fn agg_type_of(obj: &Map<String, Value>) -> &str {
@@ -122,11 +55,7 @@ type ValueRow = (String, String, Option<AnyNumeric>, Option<String>, i64);
 
 /// Rows of one stats_agg. Spec: jsonb_stats_values_plpgsql
 fn value_rows(agg: Map<String, Value>) -> Vec<ValueRow> {
-    let no_min_max = no_min_max(&agg);
-    let mut keys: Vec<&String> = agg
-        .keys()
-        .filter(|k| *k != "type" && *k != "min_max")
-        .collect();
+    let mut keys: Vec<&String> = agg.keys().filter(|k| *k != "type").collect();
     keys.sort_by(|a, b| jsonb_key_order(a, b));
     let mut rows = Vec::new();
     for key in keys {
@@ -136,7 +65,7 @@ fn value_rows(agg: Map<String, Value>) -> Vec<ValueRow> {
         let t = agg_type_of(obj);
         let base = t.strip_suffix("_agg").unwrap_or("").to_string();
         if let Some(kind) = NumKind::from_agg_type(t) {
-            let (count, sum, _) = num_state_or_empty(kind, key, obj, no_min_max);
+            let (count, sum, _) = num_state(kind, key, obj);
             rows.push((key.clone(), base, Some(numeric(&sum)), None, count));
         } else if is_counted(t) {
             let Some(Value::Object(counts)) = obj.get("counts") else {
@@ -302,11 +231,7 @@ pub fn jsonb_stats_compare(a: JsonB, b: JsonB) -> JsonB {
             show(&b)
         );
     }
-    let mut keys: Vec<&String> = a
-        .keys()
-        .chain(b.keys())
-        .filter(|k| *k != "type" && *k != "min_max")
-        .collect();
+    let mut keys: Vec<&String> = a.keys().chain(b.keys()).filter(|k| *k != "type").collect();
     keys.sort();
     keys.dedup();
     let mut out = Map::new();
@@ -347,14 +272,11 @@ pub fn jsonb_stats_compare(a: JsonB, b: JsonB) -> JsonB {
             )
         };
         let empty = || (0i64, Decimal::zero(), Decimal::zero());
-        let state = |o: &Option<Map<String, Value>>, flag: bool| match o {
-            Some(o) => num_state_or_empty(kind, key, o, flag),
+        let state = |o: &Option<Map<String, Value>>| match o {
+            Some(o) => num_state(kind, key, o),
             None => empty(),
         };
-        out.insert(
-            key.clone(),
-            compare_key(kind, state(&sa, no_min_max(&a)), state(&sb, no_min_max(&b))),
-        );
+        out.insert(key.clone(), compare_key(kind, state(&sa), state(&sb)));
     }
     JsonB(Value::Object(out))
 }

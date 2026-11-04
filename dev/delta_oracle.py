@@ -138,7 +138,7 @@ def main():
     w("INSERT INTO delta_expected VALUES\n")
     lines = []
     for m in range(1, MONTHS + 1):
-        out = {"type": "stats_agg", "min_max": False}
+        out = {"type": "stats_agg"}
         for k, kind in NUM_KEYS.items():
             stock, fin, fout = NumFlow(), NumFlow(), NumFlow()
             for _, a, b, vals in vs:

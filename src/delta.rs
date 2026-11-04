@@ -306,9 +306,6 @@ impl DeltaEntry {
     /// Parse one summary (`*_agg` or `*_delta`), validating every flow.
     /// Spec: jsonb_stats_delta_entry_plpgsql
     fn from_summary(key: &str, summary: &Value) -> DeltaEntry {
-        if key == "min_max" {
-            pgrx::error!("jsonb_stats: key 'min_max' is reserved in stats_delta");
-        }
         let Value::Object(obj) = summary else {
             pgrx::error!("jsonb_stats: summary for key '{}' must be an object", key)
         };
@@ -475,9 +472,6 @@ impl DeltaState {
                 let mut st = StatsState::default();
                 st.accumulate(m);
                 for (key, e) in st.entries {
-                    if key == "min_max" {
-                        pgrx::error!("jsonb_stats: key 'min_max' is reserved in stats_delta");
-                    }
                     self.add_entry(key, DeltaEntry::from_agg_entry(e), negative);
                 }
                 return;
@@ -487,9 +481,6 @@ impl DeltaState {
                 "jsonb_stats: expected stats, stats_agg or stats_delta, got type {}",
                 other
             ),
-        }
-        if matches!(m.get("min_max"), Some(Value::Bool(false))) {
-            pgrx::error!("jsonb_stats: a stats_agg without min/max (from jsonb_stats_delta_to_agg) is a result, not an input");
         }
         for (key, summary) in m {
             if key == "type" {
@@ -559,37 +550,18 @@ fn pct(a: &Decimal, b: &Decimal) -> Value {
     ratio_round2(&num, &den).to_json()
 }
 
+/// The standard numeric summary of a stock (no min/max; count may be 0).
 fn num_summary(kind: NumKind, count: i64, sum: &Decimal, sum_sq: &Decimal) -> Map<String, Value> {
-    if count == 0 {
-        let mut m = Map::new();
-        m.insert("type".into(), json!(kind.agg_type()));
-        m.insert("count".into(), json!(0));
-        m.insert("sum".into(), sum.to_json());
-        m.insert("sum_sq".into(), sum_sq.to_json());
-        for f in [
-            "mean",
-            "sum_sq_diff",
-            "variance",
-            "stddev",
-            "coefficient_of_variation_pct",
-        ] {
-            m.insert(f.into(), Value::Null);
-        }
-        return m;
-    }
     let f = NumFields {
         count,
         sum: sum.clone(),
         sum_sq: sum_sq.clone(),
-        min: Decimal::zero(),
-        max: Decimal::zero(),
+        min_max: None,
     };
-    let Value::Object(mut m) = f.summary_json(kind) else {
-        unreachable!()
-    };
-    m.remove("min");
-    m.remove("max");
-    m
+    match f.summary_json(kind) {
+        Value::Object(m) => m,
+        _ => unreachable!(),
+    }
 }
 
 fn flow_brief(kind: DKind, f: &Flow) -> Value {
@@ -606,7 +578,6 @@ fn delta_to_agg(stock: Value, period: Option<Value>) -> Value {
     let pe = period.map(state_of).unwrap_or_default();
     let mut out = Map::new();
     out.insert("type".into(), json!("stats_agg"));
-    out.insert("min_max".into(), json!(false));
     let mut keys: Vec<&String> = st.entries.keys().chain(pe.entries.keys()).collect();
     keys.sort();
     keys.dedup();
@@ -654,11 +625,8 @@ fn delta_to_agg(stock: Value, period: Option<Value>) -> Value {
             (Flow::Num { count, sum, sum_sq }, DKind::Num(k)) => {
                 let mut m = num_summary(k, *count, sum, sum_sq);
                 if let Some((prev, pin, pout)) = &flows {
-                    let (
-                        Flow::Num { sum: s0, .. },
-                        Flow::Num { .. },
-                        Flow::Num { .. },
-                    ) = (prev, pin, pout)
+                    let (Flow::Num { sum: s0, .. }, Flow::Num { .. }, Flow::Num { .. }) =
+                        (prev, pin, pout)
                     else {
                         unreachable!()
                     };

@@ -113,8 +113,11 @@ form makes the bytes path-independent: int/nat sums at scale 0, dec2 at 2/4,
 float trimmed of trailing zeros (a float sum's scale would otherwise depend on
 which values were ever added); zero counts and empty flows are dropped.
 
-min/max are not kept (not invertible). `jsonb_stats_delta_to_agg` marks its
-output `"min_max": false`, and that output is refused as an input.
+min/max are not kept (not invertible). `jsonb_stats_delta_to_agg` returns an
+ordinary `stats_agg` without them. In `NumFields` they are one
+`Option<(min, max)>`, so a summary has both or neither; a merge keeps them only
+when both sides have them (`None` absorbs), and date min/max likewise. Without
+min/max, `count` may be 0 (an empty stock), with mean and sum_sq_diff NULL.
 
 `DeltaState` is the Internal state for the aggregate (sfunc = msfunc,
 minvfunc, combine, serial/deserial via serde, final borrows the state, as
@@ -142,8 +145,8 @@ with the integer-square-root rounding used for stddev. The oracle computes z
 from the textbook definition (variance from the values themselves, not from
 sum_sq), so it also checks this rearrangement.
 
-A summary marked `"min_max": false` (read from deltas) may omit min/max; a
-plain `stats_agg` without them is still rejected.
+Both read summaries with `NumFields::from_summary`, so a stock read from
+deltas (no min/max, possibly count 0) is accepted like any other.
 
 ## Parallel Aggregation
 

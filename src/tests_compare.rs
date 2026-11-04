@@ -59,7 +59,7 @@ fn test_compare_shapes() {
         got,
         r#"{"e": {"z": null, "type": "int", "count_a": 1, "count_b": 0, "change_pct": -100.00, "mean_change_pct": null}, "t": {"z": null, "type": "float", "count_a": 0, "count_b": 1, "change_pct": null, "mean_change_pct": null}, "type": "stats_compare"}"#
     );
-    // Works on stocks read from deltas (min_max: false), including empty stocks.
+    // Works on stocks read from deltas (no min/max), including empty stocks.
     let got = sql_text(
         "SELECT jsonb_stats_compare(
             jsonb_stats_delta_to_agg(jsonb_stats_to_delta((SELECT jsonb_stats_agg(stats('e', g)) FROM generate_series(1, 10) g))),
@@ -98,20 +98,20 @@ fn test_compare_delta_stocks() {
         stock(24)
     ));
     assert_eq!(via_delta, reference, "reference on delta stocks");
-    // min/max are only optional when the stats_agg is marked min_max: false.
+    // min/max are optional (both or neither).
     let msg = sql_error(
-        r#"SELECT jsonb_stats_compare('{"type": "stats_agg", "e": {"type": "int_agg", "count": 2, "sum": 3, "sum_sq": 5}}', '{"type": "stats_agg"}')"#,
+        r#"SELECT jsonb_stats_compare('{"type": "stats_agg", "e": {"type": "int_agg", "count": 2, "sum": 3, "sum_sq": 5, "max": 2}}', '{"type": "stats_agg"}')"#,
     );
     assert_eq!(msg, "jsonb_stats: int_agg for key 'e' has missing or non-numeric 'min'");
     let ok = sql_text(
-        r#"SELECT jsonb_stats_compare('{"type": "stats_agg", "min_max": false, "e": {"type": "int_agg", "count": 2, "sum": 3, "sum_sq": 5}}', '{"type": "stats_agg"}')::text"#,
+        r#"SELECT jsonb_stats_compare('{"type": "stats_agg", "e": {"type": "int_agg", "count": 2, "sum": 3, "sum_sq": 5}}', '{"type": "stats_agg"}')::text"#,
     );
     assert_eq!(
         ok,
         r#"{"e": {"z": null, "type": "int", "count_a": 2, "count_b": 0, "change_pct": -100.00, "mean_change_pct": null}, "type": "stats_compare"}"#
     );
     let msg = sql_error(
-        r#"SELECT jsonb_stats_compare('{"type": "stats_agg", "min_max": false, "e": {"type": "int_agg", "count": 2, "sum": 10, "sum_sq": 1}}', '{"type": "stats_agg"}')"#,
+        r#"SELECT jsonb_stats_compare('{"type": "stats_agg", "e": {"type": "int_agg", "count": 2, "sum": 10, "sum_sq": 1}}', '{"type": "stats_agg"}')"#,
     );
     assert_eq!(msg, "jsonb_stats: int_agg for key 'e' is inconsistent (count * sum_sq < sum^2)");
 }
@@ -130,7 +130,7 @@ fn test_compare_fails_fast() {
         ),
         (
             r#"SELECT jsonb_stats_compare('{"type": "stats_agg", "e": {"type": "int_agg", "count": 0, "sum": 5, "sum_sq": 25}}', jsonb_stats_to_agg(stats('e', 1)))"#,
-            "jsonb_stats: int_agg for key 'e' has count 0 but a non-zero or missing sum/sum_sq",
+            "jsonb_stats: int_agg for key 'e' is inconsistent (count * sum_sq < sum^2)",
         ),
         (
             r#"SELECT jsonb_stats_compare('{"type": "stats_agg", "e": {"type": "foo_agg"}}', '{"type": "stats_agg"}')"#,
@@ -172,7 +172,7 @@ fn test_values_shapes() {
     assert_eq!(
         values_text(
             "jsonb_stats_values",
-            r#"'{"type": "stats_agg", "min_max": false, "x": {"type": "dec2_agg", "count": 0, "sum": 0.00, "sum_sq": 0.0000}}'"#
+            r#"'{"type": "stats_agg", "x": {"type": "dec2_agg", "count": 0, "sum": 0.00, "sum_sq": 0.0000}}'"#
         ),
         "x|dec2|0.00|~|0"
     );
