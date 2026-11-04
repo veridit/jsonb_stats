@@ -22,6 +22,10 @@
 --                                    NULL when count <= 1 or sum = 0
 --   * min/max ties between equal values with different scales keep the larger
 --     scale, so even the printed form is order independent.
+--   * min/max are optional: a summary read from deltas (jsonb_stats_delta_to_agg)
+--     has none. A summary has both or neither; a merge has them only when
+--     every input has them. count may then be 0 (an empty stock), with
+--     sum = sum_sq = 0; mean and sum_sq_diff are NULL for count 0.
 --
 
 -- ── Exact helpers ──
@@ -95,7 +99,7 @@ $jsonb_stats_sqrt_round2_ratio_plpgsql$;
 -- Pick min (want_less) or max of two values; equal values keep the larger scale.
 CREATE OR REPLACE FUNCTION jsonb_stats_pick_plpgsql(a numeric, b numeric, want_less boolean)
 RETURNS numeric
-LANGUAGE sql IMMUTABLE STRICT
+LANGUAGE sql IMMUTABLE STRICT  -- NULL in, NULL out: unknown min/max stays unknown
 AS $jsonb_stats_pick_plpgsql$
     SELECT CASE
         WHEN a = b THEN CASE WHEN scale(a) >= scale(b) THEN a ELSE b END
@@ -145,6 +149,9 @@ DECLARE
     agg_type text := summary->>'type';
     field text;
     legacy boolean := NOT summary ? 'sum_sq';
+    has_min_max boolean;
+    min_count int;
+    fields text[];
     k int;
     sq_est numeric;
     sq_floor numeric;
@@ -152,20 +159,26 @@ BEGIN
     IF legacy AND NOT summary ? 'sum_sq_diff' THEN
         RAISE EXCEPTION 'jsonb_stats: % for key ''%'' has neither ''sum_sq'' nor ''sum_sq_diff''', agg_type, key;
     END IF;
+    -- min/max: both or neither (a summary read from deltas has neither)
+    has_min_max := summary ? 'min' OR summary ? 'max' OR legacy;
+    min_count := CASE WHEN has_min_max THEN 1 ELSE 0 END;
     IF jsonb_typeof(summary->'count') IS DISTINCT FROM 'number'
-       OR (summary->'count')::numeric < 1
+       OR (summary->'count')::numeric < min_count
        OR (summary->'count')::numeric <> trunc((summary->'count')::numeric) THEN
-        RAISE EXCEPTION 'jsonb_stats: % for key ''%'' has invalid ''count'' (must be an integer >= 1)', agg_type, key;
+        RAISE EXCEPTION 'jsonb_stats: % for key ''%'' has invalid ''count'' (must be an integer >= %)', agg_type, key, min_count;
     END IF;
-    FOREACH field IN ARRAY CASE WHEN legacy THEN ARRAY['sum', 'sum_sq_diff', 'min', 'max']
-                                ELSE ARRAY['sum', 'sum_sq', 'min', 'max'] END LOOP
+    fields := CASE WHEN legacy THEN ARRAY['sum', 'sum_sq_diff'] ELSE ARRAY['sum', 'sum_sq'] END;
+    IF has_min_max THEN
+        fields := fields || ARRAY['min', 'max'];
+    END IF;
+    FOREACH field IN ARRAY fields LOOP
         IF jsonb_typeof(summary->field) IS DISTINCT FROM 'number' THEN
             RAISE EXCEPTION 'jsonb_stats: % for key ''%'' has missing or non-numeric ''%''', agg_type, key, field;
         END IF;
     END LOOP;
     count_val := trunc((summary->'count')::numeric);
     sum_val := (summary->'sum')::numeric;
-    min_val := (summary->'min')::numeric;
+    min_val := (summary->'min')::numeric;  -- NULL without min/max
     max_val := (summary->'max')::numeric;
     IF NOT legacy THEN
         sum_sq_val := (summary->'sum_sq')::numeric;
@@ -183,7 +196,7 @@ BEGIN
         sq_floor := jsonb_stats_ceil_ratio_plpgsql(sum_val * sum_val, count_val, k);
         sum_sq_val := CASE WHEN sq_floor > sq_est THEN sq_floor ELSE sq_est END;
     END IF;
-    IF count_val * sum_sq_val < sum_val * sum_val THEN
+    IF count_val * sum_sq_val < sum_val * sum_val OR (count_val = 0 AND sum_sq_val <> 0) THEN
         RAISE EXCEPTION 'jsonb_stats: % for key ''%'' is inconsistent (count * sum_sq < sum^2)', agg_type, key;
     END IF;
 END;
@@ -194,11 +207,12 @@ CREATE OR REPLACE FUNCTION jsonb_stats_num_state_obj_plpgsql(
     agg_type text, count_val numeric, sum_val numeric, sum_sq_val numeric,
     min_val numeric, max_val numeric)
 RETURNS jsonb
-LANGUAGE sql IMMUTABLE STRICT
+LANGUAGE sql IMMUTABLE
 AS $jsonb_stats_num_state_obj_plpgsql$
     SELECT jsonb_build_object(
-        'type', agg_type, 'count', count_val, 'sum', sum_val, 'sum_sq', sum_sq_val,
-        'min', min_val, 'max', max_val)
+        'type', agg_type, 'count', count_val, 'sum', sum_val, 'sum_sq', sum_sq_val)
+        || CASE WHEN min_val IS NULL OR max_val IS NULL THEN '{}'::jsonb
+                ELSE jsonb_build_object('min', min_val, 'max', max_val) END
 $jsonb_stats_num_state_obj_plpgsql$;
 
 -- Full numeric summary: exact state plus derived fields.
@@ -229,8 +243,8 @@ BEGIN
     RETURN jsonb_stats_num_state_obj_plpgsql(
                summary->>'type', st.count_val, st.sum_val, st.sum_sq_val, st.min_val, st.max_val)
         || jsonb_build_object(
-               'mean', jsonb_stats_round2_ratio_plpgsql(st.sum_val, st.count_val),
-               'sum_sq_diff', jsonb_stats_round2_ratio_plpgsql(n_big, st.count_val),
+               'mean', CASE WHEN st.count_val > 0 THEN jsonb_stats_round2_ratio_plpgsql(st.sum_val, st.count_val) END,
+               'sum_sq_diff', CASE WHEN st.count_val > 0 THEN jsonb_stats_round2_ratio_plpgsql(n_big, st.count_val) END,
                'variance', variance,
                'stddev', stddev,
                'coefficient_of_variation_pct', cv_pct);
@@ -371,16 +385,16 @@ BEGIN
                     jsonb_stats_pick_plpgsql(sa.min_val, sb.min_val, true),
                     jsonb_stats_pick_plpgsql(sa.max_val, sb.max_val, false));
             ELSIF type_a IN ('str_agg', 'bool_agg', 'arr_agg', 'date_agg') THEN
-                merged_summary := summary_a;
-                IF type_a = 'arr_agg' THEN
-                    merged_summary := merged_summary || jsonb_build_object('count', (summary_a->>'count')::int + (summary_b->>'count')::int);
-                END IF;
                 counts_a := summary_a->'counts';
                 FOR k, v IN SELECT * FROM jsonb_each(summary_b->'counts') LOOP
                     counts_a := jsonb_set(counts_a, ARRAY[k], to_jsonb(COALESCE((counts_a->>k)::int, 0) + (v->>0)::int));
                 END LOOP;
-                merged_summary := jsonb_set(merged_summary, '{counts}', counts_a);
-                IF type_a = 'date_agg' THEN
+                merged_summary := jsonb_build_object('type', type_a, 'counts', counts_a);
+                IF type_a = 'arr_agg' THEN
+                    merged_summary := merged_summary || jsonb_build_object('count', (summary_a->>'count')::int + (summary_b->>'count')::int);
+                END IF;
+                -- date min/max only when both sides have them
+                IF type_a = 'date_agg' AND summary_a ? 'min' AND summary_b ? 'min' THEN
                     merged_summary := merged_summary || jsonb_build_object(
                         'min', LEAST(summary_a->>'min' COLLATE "C", summary_b->>'min' COLLATE "C"),
                         'max', GREATEST(summary_a->>'max' COLLATE "C", summary_b->>'max' COLLATE "C"));
@@ -580,9 +594,6 @@ DECLARE
     st record;
     in_flow jsonb;
 BEGIN
-    IF key = 'min_max' THEN
-        RAISE EXCEPTION 'jsonb_stats: key ''min_max'' is reserved in stats_delta';
-    END IF;
     IF jsonb_typeof(summary) IS DISTINCT FROM 'object' THEN
         RAISE EXCEPTION 'jsonb_stats: summary for key ''%'' must be an object', key;
     END IF;
@@ -673,9 +684,6 @@ BEGIN
         d := jsonb_stats_final_plpgsql(jsonb_stats_accum_plpgsql('{}', d));
     ELSIF d ? 'type' AND d->>'type' NOT IN ('stats_agg', 'stats_delta') THEN
         RAISE EXCEPTION 'jsonb_stats: expected stats, stats_agg or stats_delta, got type %', d->'type';
-    END IF;
-    IF d->'min_max' = 'false' THEN
-        RAISE EXCEPTION 'jsonb_stats: a stats_agg without min/max (from jsonb_stats_delta_to_agg) is a result, not an input';
     END IF;
     FOR key, summary IN SELECT * FROM jsonb_each(d) LOOP
         IF key = 'type' THEN CONTINUE; END IF;
@@ -816,7 +824,7 @@ CREATE AGGREGATE jsonb_stats_delta_agg_plpgsql(jsonb) (
 -- ── Reading a stock: jsonb_stats_delta_to_agg ──
 --
 -- jsonb_stats_delta_to_agg(stock, period) turns a running sum of deltas into
--- a stats_agg marked "min_max": false. stock is the sum of all changes up to
+-- a stats_agg without min/max (they cannot be undone when a unit leaves). stock is the sum of all changes up to
 -- a date; period (optional) is the sum of the changes inside the last period,
 -- so the stock before the period is stock - period.
 --
@@ -836,7 +844,7 @@ AS $jsonb_stats_delta_to_agg_plpgsql$
 DECLARE
     st jsonb := jsonb_stats_delta_state_add_plpgsql('{}', stock, 1);
     pe jsonb := jsonb_stats_delta_state_add_plpgsql('{}', period, 1);
-    result jsonb := jsonb_build_object('type', 'stats_agg', 'min_max', false);
+    result jsonb := jsonb_build_object('type', 'stats_agg');
     key text; dt text; kind text; se jsonb; pe_e jsonb;
     net jsonb; pnet jsonb; prev jsonb; pin jsonb; pout jsonb;
     out_e jsonb;
@@ -889,24 +897,9 @@ BEGIN
             CONTINUE;
         END IF;
         IF kind IN ('int', 'nat', 'dec2', 'float') THEN
-            c := (net->>'count')::numeric;
             s := (net->>'sum')::numeric;
-            q := (net->>'sum_sq')::numeric;
-            n_big := c * q - s * s;
-            variance := NULL; stddev := NULL; cv := NULL;
-            IF c > 1 THEN
-                variance := jsonb_stats_round2_ratio_plpgsql(n_big, c * (c - 1));
-                stddev := jsonb_stats_sqrt_round2_ratio_plpgsql(n_big, c * (c - 1));
-                IF s <> 0 THEN
-                    cv := sign(s) * jsonb_stats_sqrt_round2_ratio_plpgsql(10000 * n_big * c, (c - 1) * s * s);
-                END IF;
-            END IF;
-            out_e := jsonb_build_object(
-                'type', kind || '_agg', 'count', c, 'sum', net->'sum', 'sum_sq', net->'sum_sq',
-                'mean', CASE WHEN c > 0 THEN jsonb_stats_round2_ratio_plpgsql(s, c) END,
-                'sum_sq_diff', CASE WHEN c > 0 THEN jsonb_stats_round2_ratio_plpgsql(n_big, c) END,
-                'variance', variance, 'stddev', stddev,
-                'coefficient_of_variation_pct', cv);
+            -- the standard numeric summary of the stock (no min/max)
+            out_e := jsonb_stats_num_summary_plpgsql(key, jsonb_build_object('type', kind || '_agg') || net);
             IF period IS NOT NULL THEN
                 s0 := (prev->>'sum')::numeric;
                 out_e := out_e || jsonb_build_object(
@@ -957,13 +950,13 @@ BEGIN
     END IF;
     -- jsonb_each returns keys in jsonb order (length, then bytes)
     FOR k, s IN SELECT e.key, e.value FROM jsonb_each(agg) AS e LOOP
-        CONTINUE WHEN k IN ('type', 'min_max');
+        CONTINUE WHEN k = 'type';
         IF jsonb_typeof(s) IS DISTINCT FROM 'object' THEN
             RAISE EXCEPTION 'jsonb_stats: summary for key ''%'' must be an object', k;
         END IF;
         t := s->>'type';
         IF t IN ('int_agg', 'nat_agg', 'dec2_agg', 'float_agg') THEN
-            st := jsonb_stats_num_state_or_empty_plpgsql(k, s, coalesce(agg->'min_max' = 'false', false));
+            st := jsonb_stats_num_state_or_empty_plpgsql(k, s);
             key := k; stat_type := split_part(t, '_', 1);
             value := st.sum_val; text_value := NULL; count := st.count_val;
             RETURN NEXT;
@@ -987,12 +980,9 @@ BEGIN
 END;
 $jsonb_stats_values_plpgsql$;
 
--- Numeric state of a summary that may be an empty stock (count 0, from
--- jsonb_stats_delta_to_agg): then sum and sum_sq must be 0, and sum keeps
--- its printed scale. NULL summary = empty. With no_min_max (the stats_agg
--- is marked "min_max": false) min/max are not required; otherwise as num_state.
+-- Numeric state, or empty (count 0) for a missing summary.
 CREATE OR REPLACE FUNCTION jsonb_stats_num_state_or_empty_plpgsql(
-    key text, summary jsonb, no_min_max boolean,
+    key text, summary jsonb,
     OUT count_val numeric, OUT sum_val numeric, OUT sum_sq_val numeric)
 LANGUAGE plpgsql IMMUTABLE
 AS $jsonb_stats_num_state_or_empty_plpgsql$
@@ -1001,30 +991,6 @@ DECLARE
 BEGIN
     IF summary IS NULL THEN
         count_val := 0; sum_val := 0; sum_sq_val := 0;
-    ELSIF jsonb_typeof(summary->'count') = 'number' AND (summary->'count')::numeric = 0 THEN
-        IF jsonb_typeof(summary->'sum') IS DISTINCT FROM 'number'
-           OR jsonb_typeof(summary->'sum_sq') IS DISTINCT FROM 'number'
-           OR (summary->'sum')::numeric <> 0 OR (summary->'sum_sq')::numeric <> 0 THEN
-            RAISE EXCEPTION 'jsonb_stats: % for key ''%'' has count 0 but a non-zero or missing sum/sum_sq', summary->>'type', key;
-        END IF;
-        count_val := 0; sum_val := (summary->'sum')::numeric; sum_sq_val := (summary->'sum_sq')::numeric;
-    ELSIF no_min_max THEN
-        -- from jsonb_stats_delta_to_agg ("min_max": false): count >= 1 here
-        IF jsonb_typeof(summary->'count') IS DISTINCT FROM 'number'
-           OR (summary->'count')::numeric < 1
-           OR (summary->'count')::numeric <> trunc((summary->'count')::numeric) THEN
-            RAISE EXCEPTION 'jsonb_stats: % for key ''%'' has invalid ''count'' (must be an integer >= 1)', summary->>'type', key;
-        END IF;
-        IF jsonb_typeof(summary->'sum') IS DISTINCT FROM 'number'
-           OR jsonb_typeof(summary->'sum_sq') IS DISTINCT FROM 'number' THEN
-            RAISE EXCEPTION 'jsonb_stats: % for key ''%'' has missing or non-numeric ''sum''/''sum_sq''', summary->>'type', key;
-        END IF;
-        count_val := trunc((summary->'count')::numeric);
-        sum_val := (summary->'sum')::numeric;
-        sum_sq_val := (summary->'sum_sq')::numeric;
-        IF count_val * sum_sq_val < sum_val * sum_val THEN
-            RAISE EXCEPTION 'jsonb_stats: % for key ''%'' is inconsistent (count * sum_sq < sum^2)', summary->>'type', key;
-        END IF;
     ELSE
         st := jsonb_stats_num_state_plpgsql(key, summary);
         count_val := st.count_val; sum_val := st.sum_val; sum_sq_val := st.sum_sq_val;
@@ -1059,7 +1025,7 @@ BEGIN
         RAISE EXCEPTION 'jsonb_stats: jsonb_stats_compare expects two stats_agg, got % and %', a->'type', b->'type';
     END IF;
     FOR k IN SELECT e.key FROM jsonb_each(a) AS e UNION SELECT e.key FROM jsonb_each(b) AS e ORDER BY 1 LOOP
-        CONTINUE WHEN k IN ('type', 'min_max');
+        CONTINUE WHEN k = 'type';
         sa := a->k; sb := b->k;
         IF sa IS NOT NULL AND jsonb_typeof(sa) IS DISTINCT FROM 'object' THEN
             RAISE EXCEPTION 'jsonb_stats: summary for key ''%'' must be an object', k;
@@ -1076,8 +1042,8 @@ BEGIN
         ELSIF t NOT IN ('int_agg', 'nat_agg', 'dec2_agg', 'float_agg') OR t IS NULL THEN
             RAISE EXCEPTION 'jsonb_stats: unknown aggregate type ''%''. Expected: int_agg, float_agg, dec2_agg, nat_agg, str_agg, bool_agg, arr_agg, date_agg', coalesce(t, '');
         END IF;
-        x := jsonb_stats_num_state_or_empty_plpgsql(k, sa, coalesce(a->'min_max' = 'false', false));
-        y := jsonb_stats_num_state_or_empty_plpgsql(k, sb, coalesce(b->'min_max' = 'false', false));
+        x := jsonb_stats_num_state_or_empty_plpgsql(k, sa);
+        y := jsonb_stats_num_state_or_empty_plpgsql(k, sb);
         na := x.count_val; nb := y.count_val; s_a := x.sum_val; s_b := y.sum_val;
         big_a := na * x.sum_sq_val - s_a * s_a;
         big_b := nb * y.sum_sq_val - s_b * s_b;
