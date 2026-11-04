@@ -131,10 +131,13 @@ Option A, one release 3.1.0 (master as is, HEAD):
     awk '/^## 3.1.0/{f=1;next} /^## /{if(f)exit} f' CHANGELOG.md > /tmp/notes.md
     gh release create v3.1.0 -R veridit/jsonb_stats --title "jsonb_stats 3.1.0" --notes-file /tmp/notes.md --verify-tag
 
-Option B, 3.1.0 = deltas (commit 17779bd, before values/compare) and 3.2.0 =
-values/compare: needs a new commit on master first (version 3.2.0 in
-Cargo.toml, move the two functions from sql/jsonb_stats--3.0.0--3.1.0.sql to
-a new jsonb_stats--3.1.0--3.2.0.sql, split the CHANGELOG section), then
-re-run make test / xarch / upgrade-test (OLD_REF=v3.1.0 and v3.0.0) before
-tagging both. Note: 17779bd's 3.1.0 upgrade script would then differ from
-master's, so v3.1.0 must be tagged at 17779bd, not at HEAD.
+Option B, 3.1.0 = deltas and 3.2.0 = values/compare. 17779bd (deltas only)
+can NOT be tagged as 3.1.0 any more: it lacks the 2026-11-04 fix (min/max
+optional, no marker), which STATBUS-558 needs. A 3.1.0 with deltas + fix but
+without values/compare needs a release branch from 17779bd with the fix
+commit (4673647) cherry-picked minus its values/compare parts, then the full
+checks. Then 3.2.0 on master: version 3.2.0 in Cargo.toml, values/compare
+moved from sql/jsonb_stats--3.0.0--3.1.0.sql to a new
+jsonb_stats--3.1.0--3.2.0.sql, CHANGELOG split; re-run make test / xarch /
+upgrade-test (OLD_REF=v3.1.0 and v3.0.0) before tagging. Simpler variant:
+tag master as 3.1.0 (option A) and release later additions as 3.2.0.
