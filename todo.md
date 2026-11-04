@@ -2,8 +2,7 @@
 
 ## Difference summaries (`stats_delta`), version 3.1.0
 
-Status: implemented on master, pushed, NOT tagged. Release waits until the
-STATBUS-558 prototype (hibiscus) confirms it works.
+Status: RELEASED in v3.1.0 (2026-11-04), with the min/max fix.
 
 Scope: statistics only. jsonb_stats keeps per variable what was added and
 removed; why units entered or left (births, deaths, moves) is counted by the
@@ -29,8 +28,7 @@ the CLAUDE.md checklist (tag v3.1.0, GitHub release).
 
 ## Finding what stands out: `jsonb_stats_values` and `jsonb_stats_compare`
 
-Status: DONE overnight 2026-11-03/04, pushed to master, NOT tagged (3.1 vs 3.2
-decided in the morning). See "Morning report" below.
+Status: RELEASED in v3.2.0 (2026-11-04). See "Morning report" below.
 
 Purpose: help a statistician find units and aggregates that stand out
 (errors and phenomena), independent of the variable's scale. Peer groups,
