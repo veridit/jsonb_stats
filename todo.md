@@ -3,6 +3,12 @@
 ## Difference summaries (`stats_delta`), version 3.1.0
 
 Status: RELEASED in v3.1.0 (2026-11-04), with the min/max fix.
+Consumer check: STATBUS's own postgres/Dockerfile jsonb_stats stage, built
+with jsonb_stats_release=v3.1.0 (clones GitHub, checks out the tag): control
+3.1.0, scripts up to 3.0.0--3.1.0. In the statbus-db:b6d81049 runtime image a
+fresh install gives 3.1.0, merge_agg of 4 stocks read from deltas returns
+count 4 / sum 10 / variance 1.67, stock + full has no min, to_delta accepts a
+stock, and values/compare are absent.
 
 Scope: statistics only. jsonb_stats keeps per variable what was added and
 removed; why units entered or left (births, deaths, moves) is counted by the
