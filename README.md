@@ -660,10 +660,16 @@ If you build from source, pin a release tag or commit, and bump it when you are 
 - it runs `ALTER EXTENSION jsonb_stats UPDATE`
 - it verifies that the stored summaries keep working without a recompute, and are exact after one
 
+### 3.1 to 3.2
+
+Additive: `jsonb_stats_values` and `jsonb_stats_compare` (see "Finding what
+stands out"). Existing functions and stored data are unchanged.
+`ALTER EXTENSION jsonb_stats UPDATE` creates them.
+
 ### 3.0 to 3.1
 
 Additive: new functions and the `jsonb_stats_delta_agg` aggregate (see "Stock
-over time" and "Finding what stands out"). Existing functions and stored data are unchanged.
+over time"). Existing functions and stored data are unchanged.
 `ALTER EXTENSION jsonb_stats UPDATE` creates them.
 
 ### 2.x to 3.0

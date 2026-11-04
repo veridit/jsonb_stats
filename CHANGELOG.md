@@ -1,5 +1,18 @@
 # Changelog
 
+## 3.2.0
+
+Helpers for finding units and aggregates that stand out, errors as well as
+real phenomena, independent of each variable's scale. See README "Finding
+what stands out".
+
+- `jsonb_stats_values(x)`: the variables of a `stats` or `stats_agg` as typed
+  rows, so medians, quartiles and joins between periods work on any variable.
+- `jsonb_stats_compare(a, b)`: per numeric variable, `change_pct`,
+  `mean_change_pct` and a Welch `z` of the difference in means, exact and
+  independent of scale, for finding aggregates that stand out.
+- Existing functions and stored aggregates are unchanged.
+
 ## 3.1.0
 
 Difference summaries (`stats_delta`) for keeping a stock over time as
@@ -15,11 +28,6 @@ time".
   without min/max, with the period's `in`/`out` flows and the
   unit-free rate `change_pct` next to the coefficient of
   variation.
-- `jsonb_stats_values(x)`: the variables of a `stats` or `stats_agg` as typed
-  rows, so medians, quartiles and joins between periods work on any variable.
-- `jsonb_stats_compare(a, b)`: per numeric variable, `change_pct`,
-  `mean_change_pct` and a Welch `z` of the difference in means, exact and
-  independent of scale, for finding aggregates that stand out.
 - `min`/`max` are optional in numeric (and date) summaries: both or neither.
   `jsonb_stats_merge`, `jsonb_stats_merge_agg`, `jsonb_stats_final`,
   `jsonb_stats_to_delta` and `jsonb_stats_delta_agg` accept summaries without

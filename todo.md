@@ -131,7 +131,12 @@ Open for the owner:
 2. hibiscus is told once now (owner's instruction), for later use, not for
    the first prototype.
 
-### Release, once the owner chooses (nothing tagged yet)
+### Releases
+
+Done 2026-11-04: v3.1.0 (deltas + optional min/max, tag at 8fcfb3e on
+branch rel-3.1) and v3.2.0 (values/compare, master). Notes below are history.
+
+#### Release options (as planned before)
 
 Option A, one release 3.1.0 (master as is, HEAD):
     git tag -a v3.1.0 -m "jsonb_stats 3.1.0: stats_delta, values, compare" && git push origin v3.1.0
