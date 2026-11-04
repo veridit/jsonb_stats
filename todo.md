@@ -117,6 +117,13 @@ min/max are optional in every stats_agg (both or neither); merge, merge_agg,
 final, to_delta, delta_agg, values and compare accept summaries without them,
 and a merge keeps them only when every input has them. Count 0 is allowed
 without min/max.
+Acceptance on STATBUS's own output (statbus_local copied to a scratch db,
+built with 4673647): facet stocks at the ends of 2025-01, -06 and -11 read
+from deltas (38,904 cells), then merged across regions with
+jsonb_stats_merge_agg, as STATBUS readers do (18,153 groups): equal by value
+and key set to merging STATBUS's stored facet rows the same way, 18,153 of
+18,153 (1,758 groups have no statistics on either side). No merged result
+carries min/max; the stored full summaries do in 16,395 groups.
 
 Open for the owner:
 1. Release as 3.1.0 (one release with deltas) or tag the deltas as 3.1.0 and
