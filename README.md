@@ -464,67 +464,6 @@ window such as `ROWS BETWEEN 11 PRECEDING AND CURRENT ROW` (rolling 12
 months) subtracts the row that leaves the frame instead of recomputing, and
 the result is identical to a fresh sum.
 
-## Finding what stands out
-
-Two helpers for spotting units and aggregates that deserve a look, errors as
-well as real phenomena, independent of each variable's scale. Peer groups,
-thresholds and ranking stay in your SQL; jsonb_stats makes the dynamic
-variables easy to reach and gives exact unit-free measures.
-
-**`jsonb_stats_values(x)`** turns a `stats` or `stats_agg` into rows
-`(key, stat_type, value, text_value, count)`, so PostgreSQL's own aggregates
-and joins work on any variable without knowing its name:
-- numeric variables: `value` is the value (for a `stats_agg`, the sum) and
-  `count` the number of units
-- `str`, `bool`, `date`, `arr`: one row per category, in `text_value`, with
-  its count
-- a `stats` is read exactly as `jsonb_stats_to_agg(stats)` would read it;
-  a `stats_delta` must be read with `jsonb_stats_delta_to_agg` first
-
-Units far from their peers, for every variable at once, with median and
-quartiles (robust against the giants that distort mean and stddev):
-
-```sql
-WITH v AS (SELECT u.unit_id, u.activity, x.* FROM unit u, jsonb_stats_values(u.stats) x),
-peers AS (SELECT activity, key,
-                 percentile_cont(0.25) WITHIN GROUP (ORDER BY value) AS q1,
-                 percentile_cont(0.75) WITHIN GROUP (ORDER BY value) AS q3,
-                 count(*) AS n
-          FROM v WHERE value IS NOT NULL GROUP BY 1, 2)
-SELECT v.unit_id, v.key, v.value
-FROM v JOIN peers p USING (activity, key)
-WHERE p.n >= 20 AND v.value > p.q3 + 3 * (p.q3 - p.q1);
-```
-
-Change per unit between two periods is a join of two `jsonb_stats_values` on
-`(unit_id, key)`, then a ratio.
-
-**`jsonb_stats_compare(a, b)`** compares a subject `b` with a reference `a`
-(the previous period, or the peers), both `stats_agg` (including stocks read
-from deltas). For every numeric variable in either:
-
-| Field | Meaning |
-|-------|---------|
-| `count_a`, `count_b` | number of units on each side (a missing variable counts as 0) |
-| `change_pct` | `100 · (sum_b − sum_a) / \|sum_a\|` |
-| `mean_change_pct` | `100 · (mean_b − mean_a) / \|mean_a\|` |
-| `z` | `(mean_b − mean_a) / √(var_a/n_a + var_b/n_b)`: the difference in means relative to its spread (Welch) |
-
-Each is computed from the exact state and rounded once to 2 decimals; NULL
-when undefined (a sum or count of 0, fewer than 2 units, no spread). `z`
-takes the number of units into account, so a 2-unit cell does not outrank a
-2,000-unit cell by chance. Use it as a ranking score, not a significance
-test: for the same cell in two periods most units are in both, so `|z|` is
-overstated. Text and category variables are skipped.
-
-```sql
--- activities whose mean employees differ most from all units of their type
-SELECT c.activity, x->'employees'->>'mean_change_pct', x->'employees'->>'z'
-FROM cell c JOIN everything p USING (unit_type),
-     LATERAL jsonb_stats_compare(p.agg, c.agg) AS x
-ORDER BY abs((x->'employees'->>'z')::numeric) DESC NULLS LAST;
-```
-
 ## Performance
 
 The Rust implementation (via pgrx) uses native `HashMap` state with `Box` heap allocation, avoiding JSONB serialization on every row. Benchmarks compare against the PL/pgSQL reference implementation:
@@ -615,8 +554,6 @@ While this adds a level of nesting compared to working with raw `jsonb` values, 
 | `jsonb_stats_negate(x jsonb)` | Exit event: in and out swapped. Not an undo: an entry plus its negation leaves both flows |
 | `jsonb_stats_delta_merge(a jsonb, b jsonb)` | Sum of two deltas |
 | `jsonb_stats_delta_to_agg(stock jsonb, period jsonb DEFAULT NULL)` | A stock as a `stats_agg` without min/max, plus `in`/`out` and `change_pct` for the period. Fails if the stock or the stock before the period is negative or inconsistent |
-| `jsonb_stats_values(x jsonb)` | Variables of a `stats` or `stats_agg` as rows `(key, stat_type, value, text_value, count)` (see "Finding what stands out") |
-| `jsonb_stats_compare(a jsonb, b jsonb)` | Per numeric variable: `change_pct`, `mean_change_pct` and `z` of `b` against the reference `a` |
 | `jsonb_stats_accum(state jsonb, stats jsonb)` | Low-level: accumulate one `stats` into running state (numeric entries carry only `count`, `sum`, `sum_sq`, `min`, `max`) |
 | `jsonb_stats_final(state jsonb)` | Low-level: compute derived stats (mean, sum_sq_diff, variance, stddev, cv_pct) on accumulated state |
 
@@ -663,7 +600,7 @@ If you build from source, pin a release tag or commit, and bump it when you are 
 ### 3.0 to 3.1
 
 Additive: new functions and the `jsonb_stats_delta_agg` aggregate (see "Stock
-over time" and "Finding what stands out"). Existing functions and stored data are unchanged.
+over time"). Existing functions and stored data are unchanged.
 `ALTER EXTENSION jsonb_stats UPDATE` creates them.
 
 ### 2.x to 3.0

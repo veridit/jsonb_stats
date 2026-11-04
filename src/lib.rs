@@ -3,7 +3,6 @@ use pgrx::prelude::*;
 pg_module_magic!();
 
 mod accum;
-mod compare;
 mod delta;
 mod exact;
 mod final_fn;
@@ -14,7 +13,6 @@ mod state;
 
 // Re-export all pg_extern functions so pgrx can discover them
 pub use accum::{jsonb_stats_accum, jsonb_stats_accum_sfunc};
-pub use compare::{jsonb_stats_compare, jsonb_stats_values};
 pub use delta::{
     jsonb_stats_delta_combine, jsonb_stats_delta_deserial, jsonb_stats_delta_final_internal,
     jsonb_stats_delta_merge, jsonb_stats_delta_minvfunc, jsonb_stats_delta_serial,
@@ -130,7 +128,6 @@ mod tests {
 
     include!("tests_exact.rs");
     include!("tests_delta.rs");
-    include!("tests_compare.rs");
 
     #[pg_test]
     fn test_extension_loads() {
