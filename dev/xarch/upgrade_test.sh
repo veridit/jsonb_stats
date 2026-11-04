@@ -19,7 +19,10 @@ OLD_VER=$(sed -n 's/^version = "\(.*\)"/\1/p' /old/Cargo.toml | head -1)
 NEW_VER=$(sed -n 's/^version = "\(.*\)"/\1/p' /new/Cargo.toml | head -1)
 echo "== upgrade path: $OLD_VER ($OLD_REF) -> $NEW_VER"
 [ -f "/new/sql/jsonb_stats--$OLD_VER--$NEW_VER.sql" ] \
-  || { echo "missing sql/jsonb_stats--$OLD_VER--$NEW_VER.sql"; exit 1; }
+  || ls /new/sql/jsonb_stats--$OLD_VER--*.sql >/dev/null 2>&1 \
+  || { echo "missing sql/jsonb_stats--$OLD_VER--*.sql (no upgrade path from $OLD_VER)"; exit 1; }
+# A chain (e.g. 3.0.0--3.1.0 then 3.1.0--3.2.0) is fine: ALTER EXTENSION
+# UPDATE follows it, and the checks below fail if it does not reach NEW_VER.
 
 echo "== installing old ($OLD_REF)"
 (cd /old && cargo pgrx install --release --pg-config $PGC >/tmp/old.log 2>&1) || { tail -20 /tmp/old.log; exit 1; }
@@ -66,9 +69,15 @@ su postgres -c "/usr/lib/postgresql/18/bin/pg_ctl -D /pgdata -w stop >/dev/null"
 echo "== swap in $NEW_VER library and ALTER EXTENSION UPDATE"
 cp /tmp/jsonb_stats-new.so /usr/lib/postgresql/18/lib/jsonb_stats.so
 su postgres -c "/usr/lib/postgresql/18/bin/pg_ctl -D /pgdata -l /tmp/pg.log -w start >/dev/null"
-$P "psql -X -At -v ON_ERROR_STOP=1" <<'EOF'
+$P "psql -X -At -v ON_ERROR_STOP=1 -v new_ver=$NEW_VER" <<'EOF'
 ALTER EXTENSION jsonb_stats UPDATE;
 SELECT 'version: ' || extversion FROM pg_extension WHERE extname = 'jsonb_stats';
+SELECT set_config('jsonb_stats.new_ver', :'new_ver', false);
+DO $$ BEGIN
+    IF (SELECT extversion FROM pg_extension WHERE extname = 'jsonb_stats') <> current_setting('jsonb_stats.new_ver') THEN
+        RAISE EXCEPTION 'upgrade did not reach %', current_setting('jsonb_stats.new_ver');
+    END IF;
+END $$;
 -- Stored 2.x summaries keep working with no recompute (sum_sq rebuilt on read).
 CREATE TEMP TABLE before_refresh AS SELECT jsonb_stats_merge_agg(agg)->'n' AS r FROM facet;
 SELECT 'stored 2.x, merged:  ' || r::text FROM before_refresh;
