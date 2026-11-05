@@ -95,7 +95,7 @@ Release checklist (downstream projects pin release tags, so every release gets o
    ```
 
 Existing tags: `v2.0.0` (tagged retroactively at c4a2595), `v3.0.0`, `v3.1.0`
-(on branch `rel-3.1`, 8fcfb3e: stats_delta, without values/compare), `v3.2.0`
+(8fcfb3e, in master's history: stats_delta, without values/compare), `v3.2.0`
 (master, 97d7b3d). `make upgrade-test` follows chained upgrade scripts.
 
 ## Git Setup

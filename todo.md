@@ -137,8 +137,8 @@ Open for the owner:
 
 ### Releases
 
-Done 2026-11-04: v3.1.0 (deltas + optional min/max, tag at 8fcfb3e on
-branch rel-3.1) and v3.2.0 (values/compare, master). Notes below are history.
+Done 2026-11-04: v3.1.0 (deltas + optional min/max, tag at 8fcfb3e, in
+master's history) and v3.2.0 (values/compare, master). Notes below are history.
 
 #### Release options (as planned before)
 
