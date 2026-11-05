@@ -725,3 +725,21 @@ The extension is implemented in Rust via [pgrx](https://github.com/pgcentralfoun
 make test             # Run all tests (including benchmarks)
 make run              # Launch psql with extension loaded
 ```
+
+### Prerequisites and pgrx setup
+
+- Rust (via rustup) and `cargo install --locked cargo-pgrx --version 0.16.1`
+  (the version must match `pgrx` in `Cargo.toml`).
+- A local PostgreSQL 18. The Makefile uses Postgres.app by default
+  (`PGRX_PG_CONFIG_PATH`); override it for another install.
+- Docker, only for `make xarch` and `make upgrade-test`.
+
+pgrx keeps its own setup in `~/.pgrx`: `config.toml` says which `pg_config`
+to build and test against, and `data-18/` is the test cluster that
+`cargo pgrx test` starts. You never need to create it by hand: every Makefile
+target that runs `cargo pgrx` (`test`, `clippy`, `run`, `install`, `package`)
+depends on `make pgrx-init`, which runs
+`cargo pgrx init --pg18 $PGRX_PG_CONFIG_PATH` when `~/.pgrx/config.toml` is
+missing and does nothing otherwise. It downloads nothing (about 40 MB, the test
+cluster), so `~/.pgrx` is safe to delete to free space; the next `make` target
+recreates it.

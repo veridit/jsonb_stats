@@ -10,7 +10,7 @@ The PL/pgSQL reference (`dev/reference_plpgsql.sql`) is the authoritative spec â
 
 ## Build & Test Commands
 
-The Makefile handles the pgrx environment variables (macOS SDK path workaround):
+The Makefile handles the pgrx environment variables (macOS SDK path workaround) and runs `cargo pgrx init` automatically when `~/.pgrx/config.toml` is missing (`make pgrx-init`; see README "Prerequisites and pgrx setup"):
 
 ```bash
 make test        # Run all tests (pg_tests: correctness + exactness + error handling + benchmarks; plus unit tests)

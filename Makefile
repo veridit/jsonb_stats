@@ -14,7 +14,17 @@ export BINDGEN_EXTRA_CLANG_ARGS
 PG_VERSION ?= pg18
 SHELL := /bin/bash
 
-.PHONY: clippy test test-crash run install package fixture fixture-check xarch upgrade-test
+.PHONY: pgrx-init clippy test test-crash run install package fixture fixture-check xarch upgrade-test
+
+# pgrx keeps its config in ~/.pgrx/config.toml (which pg_config to use per
+# PostgreSQL version). It is created once, pointing at the same PostgreSQL the
+# targets below use; nothing is downloaded or compiled. Every target that runs
+# cargo pgrx depends on it, so a missing or deleted ~/.pgrx is recreated
+# automatically.
+PGRX_HOME ?= $(HOME)/.pgrx
+$(PGRX_HOME)/config.toml:
+	cargo pgrx init --$(PG_VERSION) $(PGRX_PG_CONFIG_PATH)
+pgrx-init: $(PGRX_HOME)/config.toml
 
 # Real upgrade test (needs Docker): install OLD_REF (previous release tag),
 # store aggregates, ALTER EXTENSION UPDATE to this tree, verify results.
@@ -24,10 +34,10 @@ upgrade-test:
 	docker run --rm --platform linux/arm64 -e OLD_REF=$(OLD_REF) -v $(CURDIR):/src_ro:ro --tmpfs /cache:exec,size=8g \
 		jsonb-stats-builder bash /src_ro/dev/xarch/upgrade_test.sh
 
-test:
+test: pgrx-init
 	cargo pgrx test $(PG_VERSION)
 
-clippy:
+clippy: pgrx-init
 	cargo clippy --features "$(PG_VERSION) pg_test" --no-default-features --all-targets -- -D warnings
 
 # Regenerate the exact-oracle fixture used by src/tests_exact.rs
@@ -63,11 +73,11 @@ xarch:
 test-crash: install
 	psql -d postgres -f dev/test-crash.sql
 
-run:
+run: pgrx-init
 	cargo pgrx run $(PG_VERSION)
 
-install:
+install: pgrx-init
 	cargo pgrx install
 
-package:
+package: pgrx-init
 	cargo pgrx package
